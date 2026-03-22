@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -46,11 +47,19 @@ func main() {
 	}
 
 	// Config from env (overridable).
-	dbPath        := envOr("MEMORY_DB", defaultDB)
-	ollamaURL     := envOr("MEMORY_OLLAMA", defaultOllama)
-	extractModel  := envOr("MEMORY_MODEL", defaultExtractModel)
-	embedModel    := envOr("MEMORY_EMBED_MODEL", defaultEmbeddingModel)
-	groupID       := envOr("MEMORY_GROUP", defaultGroup)
+	dbPath           := envOr("MEMORY_DB", defaultDB)
+	ollamaURL        := envOr("MEMORY_OLLAMA", defaultOllama)
+	extractModel     := envOr("MEMORY_MODEL", defaultExtractModel)
+	embedModel       := envOr("MEMORY_EMBED_MODEL", defaultEmbeddingModel)
+	groupID          := envOr("MEMORY_GROUP", defaultGroup)
+	resolveThreshold := 0.92
+	if v := os.Getenv("MEMORY_RESOLVE_THRESHOLD"); v != "" {
+		t, err := strconv.ParseFloat(v, 64)
+		if err != nil || t <= 0 || t > 1 {
+			fatalf("MEMORY_RESOLVE_THRESHOLD must be a float in (0, 1], got %q", v)
+		}
+		resolveThreshold = t
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -81,7 +90,7 @@ func main() {
 		if err := client.Warmup(ctx); err != nil {
 			slog.Warn("warmup failed", "err", err)
 		}
-		runWorker(ctx, db, client)
+		runWorker(ctx, db, client, resolveThreshold)
 
 	case "run":
 		if len(os.Args) < 3 {
@@ -97,7 +106,7 @@ func main() {
 		n, err := ingest.New(db, groupID).Walk(ctx, os.Args[2])
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
-		runWorker(ctx, db, client)
+		runWorker(ctx, db, client, resolveThreshold)
 
 	case "search":
 		fs := flag.NewFlagSet("search", flag.ExitOnError)
@@ -126,8 +135,8 @@ func main() {
 }
 
 // runWorker polls the SQLite queue and processes jobs with max 1 concurrent LLM call.
-func runWorker(ctx context.Context, db *store.DB, client *llm.Client) {
-	ext := graph.New(db, client)
+func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThreshold float64) {
+	ext := graph.New(db, client, resolveThreshold)
 	concurrency := runtime.NumCPU()
 	if concurrency > 4 {
 		concurrency = 4

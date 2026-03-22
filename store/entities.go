@@ -18,7 +18,6 @@ type Entity struct {
 // UpsertEntity inserts or merges an entity by name+group (case-insensitive).
 // Returns the canonical UUID that should be used.
 func (d *DB) UpsertEntity(ctx context.Context, e Entity) (string, error) {
-	// Check if entity with same name already exists in this group.
 	var existing string
 	err := d.sql.QueryRowContext(ctx,
 		`SELECT uuid FROM entities
@@ -26,13 +25,10 @@ func (d *DB) UpsertEntity(ctx context.Context, e Entity) (string, error) {
 		 LIMIT 1`,
 		e.GroupID, e.Name,
 	).Scan(&existing)
-
 	if err != nil && err != sql.ErrNoRows {
 		return "", fmt.Errorf("lookup entity: %w", err)
 	}
-
 	if existing != "" {
-		// Update embedding if we have a new one.
 		if len(e.Embedding) > 0 {
 			_, err = d.sql.ExecContext(ctx,
 				`UPDATE entities SET embedding = ? WHERE uuid = ?`,
@@ -42,12 +38,10 @@ func (d *DB) UpsertEntity(ctx context.Context, e Entity) (string, error) {
 		return existing, err
 	}
 
-	// Insert new entity.
 	var embBlob []byte
 	if len(e.Embedding) > 0 {
 		embBlob = EncodeEmbedding(e.Embedding)
 	}
-
 	_, err = d.sql.ExecContext(ctx, `
 		INSERT INTO entities (uuid, name, entity_type, group_id, embedding)
 		VALUES (?, ?, ?, ?, ?)`,
@@ -56,7 +50,6 @@ func (d *DB) UpsertEntity(ctx context.Context, e Entity) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("insert entity: %w", err)
 	}
-
 	if _, err := d.sql.ExecContext(ctx,
 		`DELETE FROM entities_fts WHERE uuid = ?`, e.UUID,
 	); err != nil {

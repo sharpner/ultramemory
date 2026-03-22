@@ -24,19 +24,22 @@ type IngestPayload struct {
 // Extractor runs the full graph-building pipeline for a document chunk.
 // A semaphore (cap 1) ensures max one gemma3:4b call at a time.
 type Extractor struct {
-	db       *store.DB
-	llm      *llm.Client
-	sem      chan struct{} // capacity 1 = max 1 concurrent LLM call
-	muEntity sync.Mutex   // serialise entity upserts to avoid duplicates under concurrency
-	embedWG  sync.WaitGroup // tracks in-flight embedding goroutines
+	db               *store.DB
+	llm              *llm.Client
+	sem              chan struct{} // capacity 1 = max 1 concurrent LLM call
+	muEntity         sync.Mutex   // serialise entity upserts to avoid duplicates under concurrency
+	embedWG          sync.WaitGroup // tracks in-flight embedding goroutines
+	resolveThreshold float64
 }
 
-// New creates a new Extractor.
-func New(db *store.DB, client *llm.Client) *Extractor {
+// New creates a new Extractor. resolveThreshold is the minimum cosine similarity
+// for two entities to be considered the same (e.g. 0.92).
+func New(db *store.DB, client *llm.Client, resolveThreshold float64) *Extractor {
 	return &Extractor{
-		db:  db,
-		llm: client,
-		sem: make(chan struct{}, 1),
+		db:               db,
+		llm:              client,
+		sem:              make(chan struct{}, 1),
+		resolveThreshold: resolveThreshold,
 	}
 }
 
@@ -102,19 +105,19 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		"llm_ms", time.Since(start).Milliseconds(),
 	)
 
-	// ── 5. Store entities + link to episode ──────────────────────────────────
+	// ── 5. Resolve entities: embed → FTS dedup → upsert → link ──────────────
 	entityUUIDs := make([]string, len(extracted.Entities))
 	for i, ent := range extracted.Entities {
+		vec, err := e.llm.Embed(ctx, ent.Name+" ("+ent.EntityType+")")
+		if err != nil {
+			slog.Debug("embed entity failed", "name", ent.Name, "err", err)
+		}
+
 		e.muEntity.Lock()
-		canonical, err := e.db.UpsertEntity(ctx, store.Entity{
-			UUID:       uuid.New().String(),
-			Name:       ent.Name,
-			EntityType: ent.EntityType,
-			GroupID:    groupID,
-		})
+		canonical, err := e.resolveOrCreate(ctx, ent.Name, ent.EntityType, groupID, vec)
 		e.muEntity.Unlock()
 		if err != nil {
-			return fmt.Errorf("upsert entity %q: %w", ent.Name, err)
+			return fmt.Errorf("resolve entity %q: %w", ent.Name, err)
 		}
 		entityUUIDs[i] = canonical
 
@@ -146,12 +149,9 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		}
 	}
 
-	// ── 7. Async embeddings (best-effort, non-blocking) ───────────────────────
-	e.embedWG.Add(1 + len(extracted.Entities))
+	// ── 7. Async episode embedding (best-effort, non-blocking) ──────────────
+	e.embedWG.Add(1)
 	go e.embedEpisode(context.Background(), epUUID, content)
-	for i, ent := range extracted.Entities {
-		go e.embedEntity(context.Background(), entityUUIDs[i], ent.Name+" ("+ent.EntityType+")")
-	}
 
 	return nil
 }
@@ -160,6 +160,32 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 // Useful in tests to ensure embeddings are written before searching.
 func (e *Extractor) Wait() {
 	e.embedWG.Wait()
+}
+
+// resolveOrCreate looks up an existing entity via FTS + cosine similarity, or
+// inserts a new one. Caller must hold muEntity.
+func (e *Extractor) resolveOrCreate(ctx context.Context, name, entityType, groupID string, embedding []float32) (string, error) {
+	if len(embedding) > 0 {
+		candidates, err := e.db.SearchEntitiesFTS(ctx, name, groupID, 5)
+		if err != nil {
+			return "", fmt.Errorf("fts candidates: %w", err)
+		}
+		for _, c := range candidates {
+			if c.EntityType != entityType || len(c.Embedding) == 0 {
+				continue
+			}
+			if store.CosineSimilarity(embedding, c.Embedding) >= e.resolveThreshold {
+				return c.UUID, nil
+			}
+		}
+	}
+	return e.db.UpsertEntity(ctx, store.Entity{
+		UUID:       uuid.New().String(),
+		Name:       name,
+		EntityType: entityType,
+		GroupID:    groupID,
+		Embedding:  embedding,
+	})
 }
 
 func (e *Extractor) embedEpisode(ctx context.Context, uuid, content string) {
@@ -174,21 +200,6 @@ func (e *Extractor) embedEpisode(ctx context.Context, uuid, content string) {
 		store.EncodeEmbedding(vec), uuid,
 	); err != nil {
 		slog.Debug("store episode embedding failed", "err", err)
-	}
-}
-
-func (e *Extractor) embedEntity(ctx context.Context, id, name string) {
-	defer e.embedWG.Done()
-	vec, err := e.llm.Embed(ctx, name)
-	if err != nil {
-		slog.Debug("embed entity failed", "err", err)
-		return
-	}
-	if _, err := e.db.SQL().ExecContext(ctx,
-		`UPDATE entities SET embedding = ? WHERE uuid = ?`,
-		store.EncodeEmbedding(vec), id,
-	); err != nil {
-		slog.Debug("store entity embedding failed", "err", err)
 	}
 }
 

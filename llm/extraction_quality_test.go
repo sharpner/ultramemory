@@ -305,6 +305,55 @@ JONATHAN HARKER'S JOURNAL
 	}
 }
 
+// TestExtractionQuality_NameOrder verifies that person names are extracted in
+// natural "First Last" order, not inverted "Last, First" or "Last First" forms.
+func TestExtractionQuality_NameOrder(t *testing.T) {
+	c := newTestClient()
+	skipIfNoOllama(t, c)
+	ctx, cancel := ctx2m()
+	defer cancel()
+
+	// Names appear in normal prose order — model must not invert them.
+	text := `Dr. Anna Bergmann presented her findings at the conference.
+	Karl von Moltke commanded the Prussian forces.
+	Marie Curie discovered radioactivity together with her husband Pierre Curie.`
+
+	got, err := c.ExtractEntities(ctx, text)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	t.Logf("entities: %+v", got.Entities)
+
+	// Inverted patterns: "Bergmann Anna", "Moltke Karl", "Curie Marie"
+	invertedPatterns := []struct{ inverted, canonical string }{
+		{"Bergmann Anna", "Anna Bergmann"},
+		{"Moltke Karl", "Karl von Moltke"},
+		{"Curie Marie", "Marie Curie"},
+		{"Curie Pierre", "Pierre Curie"},
+	}
+	for _, p := range invertedPatterns {
+		for _, e := range got.Entities {
+			if strings.EqualFold(e.Name, p.inverted) {
+				t.Errorf("inverted name %q found — expected %q", e.Name, p.canonical)
+			}
+		}
+	}
+
+	// All four persons must be found in correct order.
+	mustFind := []string{"Anna Bergmann", "Karl von Moltke", "Marie Curie", "Pierre Curie"}
+	for _, want := range mustFind {
+		found := false
+		for _, e := range got.Entities {
+			if strings.EqualFold(e.Name, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("person %q not found (or was inverted), got: %v", want, entityNames(got.Entities))
+		}
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func entityNames(entities []ExtractedEntity) []string {
