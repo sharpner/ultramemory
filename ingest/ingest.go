@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -51,6 +52,32 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 			}
 			return skipDir(d.Name())
 		}
+		if isPDF(path) {
+			text, err := extractPDFText(path)
+			if err != nil {
+				slog.Warn("skip pdf", "path", path, "err", err)
+				return nil
+			}
+
+			chunks := chunk(text, chunkSize, chunkOverlap)
+			for _, c := range chunks {
+				c = strings.TrimSpace(c)
+				if len(c) < 50 {
+					continue
+				}
+				payload, _ := json.Marshal(graph.IngestPayload{
+					Content: c,
+					Source:  path,
+					GroupID: w.groupID,
+				})
+				if err := w.db.PushJob(ctx, store.JobTypeIngest, string(payload)); err != nil {
+					return fmt.Errorf("push job: %w", err)
+				}
+				total++
+			}
+			return nil
+		}
+
 		if !isText(path) {
 			return nil
 		}
@@ -110,6 +137,33 @@ func isText(path string) bool {
 		".proto": true, ".graphql": true, ".html": true, ".css": true,
 	}
 	return ok[ext]
+}
+
+// isPDF returns true when path has a .pdf extension.
+func isPDF(path string) bool {
+	return strings.ToLower(filepath.Ext(path)) == ".pdf"
+}
+
+// extractPDFText runs pdftotext and returns the extracted plain text.
+// Returns an error if pdftotext is not in PATH or extraction fails.
+func extractPDFText(path string) (string, error) {
+	bin, err := exec.LookPath("pdftotext")
+	if err != nil {
+		slog.Warn("pdftotext not found in PATH, skipping PDF", "path", path)
+		return "", fmt.Errorf("pdftotext not available: %w", err)
+	}
+
+	out, err := exec.Command(bin, path, "-").Output()
+	if err != nil {
+		return "", fmt.Errorf("pdftotext failed: %w", err)
+	}
+
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return "", fmt.Errorf("pdftotext produced empty output for %s", path)
+	}
+
+	return text, nil
 }
 
 // chunk splits text into overlapping windows of at most size runes.
