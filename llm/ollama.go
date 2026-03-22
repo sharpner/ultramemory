@@ -208,9 +208,10 @@ func (c *Client) ExtractEdges(ctx context.Context, entities []ExtractedEntity, c
 
 // Embed generates an embedding vector for the given text using nomic-embed-text.
 func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
-	body := map[string]string{
-		"model":  c.embeddingModel,
-		"prompt": text,
+	body := map[string]any{
+		"model":      c.embeddingModel,
+		"prompt":     text,
+		"keep_alive": -1,
 	}
 	raw, _ := json.Marshal(body)
 
@@ -243,6 +244,8 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 // chat sends a chat completion to Ollama and returns cleaned JSON content + latency.
+// Uses /api/chat (native) instead of /v1/chat/completions to access keep_alive,
+// cache_prompt and num_ctx — taken from nino/claude-files/chat.py optimisations.
 func (c *Client) chat(ctx context.Context, model, system, user string) (string, time.Duration, error) {
 	body := map[string]any{
 		"model": model,
@@ -250,20 +253,24 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 			{"role": "system", "content": system},
 			{"role": "user", "content": user},
 		},
-		"temperature": 0,
-		"max_tokens":  4096,
-		"format":      "json", // Ollama-native JSON mode
-		"stream":      false,
+		"format":       "json", // Ollama-native JSON mode
+		"stream":       false,
+		"keep_alive":   -1, // model stays loaded forever — no reload between jobs
+		"cache_prompt": true, // reuse KV-cache for system prompt across calls
+		"options": map[string]any{
+			"num_ctx":     2048, // explicit context window — smaller = faster attention
+			"num_predict": 4096, // max output tokens
+			"temperature": 0,
+		},
 	}
 
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.baseURL+"/v1/chat/completions", bytes.NewReader(raw))
+		c.baseURL+"/api/chat", bytes.NewReader(raw))
 	if err != nil {
 		return "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer ollama")
 
 	start := time.Now()
 	resp, err := c.http.Do(req)
@@ -281,19 +288,18 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 		return "", latency, fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, truncate(string(data), 80))
 	}
 
+	// /api/chat response: {"message": {"role": "assistant", "content": "..."}, "done": true}
 	var cr struct {
-		Choices []struct {
-			Message struct{ Content string `json:"content"` } `json:"message"`
-		} `json:"choices"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		Done bool `json:"done"`
 	}
 	if err := json.Unmarshal(data, &cr); err != nil {
 		return "", latency, fmt.Errorf("unmarshal: %w", err)
 	}
-	if len(cr.Choices) == 0 {
-		return "", latency, fmt.Errorf("empty choices")
-	}
 
-	content := cr.Choices[0].Message.Content
+	content := cr.Message.Content
 	content = thinkRe.ReplaceAllString(content, "")
 	content = strings.TrimPrefix(content, "```json")
 	content = strings.TrimPrefix(content, "```")
