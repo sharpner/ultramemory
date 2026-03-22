@@ -142,5 +142,56 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 			}
 		}
 	}
+
+	// ── 4. MAGMA graph traversal ───────────────────────────────────────────────
+	seeds := entitySeeds(results, 5)
+	if len(seeds) > 0 {
+		expanded, err := SpreadMAGMA(ctx, db, seeds, query, groupID, DefaultMAGMAConfig())
+		if err == nil {
+			results = mergeMAGMA(results, expanded, limit)
+		}
+	}
+
 	return results, nil
+}
+
+// entitySeeds extracts the top-n entity results as MAGMA seed nodes.
+func entitySeeds(results []SearchResult, n int) []ActivatedNode {
+	seeds := make([]ActivatedNode, 0, n)
+	for _, r := range results {
+		if r.Type != "entity" {
+			continue
+		}
+		seeds = append(seeds, ActivatedNode{UUID: r.UUID, Name: r.Title, EntityType: r.Body})
+		if len(seeds) >= n {
+			break
+		}
+	}
+	return seeds
+}
+
+// mergeMAGMA adds graph-traversal results not already in results, then re-sorts.
+func mergeMAGMA(results []SearchResult, activated []ActivatedNode, limit int) []SearchResult {
+	seen := make(map[string]bool, len(results))
+	for _, r := range results {
+		seen[r.UUID] = true
+	}
+	for _, a := range activated {
+		if seen[a.UUID] {
+			continue
+		}
+		seen[a.UUID] = true
+		results = append(results, SearchResult{
+			Type:  "entity",
+			UUID:  a.UUID,
+			Title: a.Name,
+			Body:  a.EntityType,
+			Score: a.Activation * 0.8,
+		})
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results
 }

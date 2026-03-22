@@ -103,6 +103,9 @@ CREATE INDEX IF NOT EXISTS idx_edges_src
 
 CREATE INDEX IF NOT EXISTS idx_edges_tgt
 	ON edges(target_uuid);
+
+CREATE INDEX IF NOT EXISTS idx_edges_group
+	ON edges(group_id);
 `
 
 // DB wraps a SQLite database connection.
