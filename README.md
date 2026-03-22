@@ -37,6 +37,10 @@ ultramemory worker             # process queue (runs until Ctrl+C)
 # Search the graph
 ultramemory search "Alice Schmidt TechCorp"
 
+# Search with token budget (LLM-friendly output)
+ultramemory search -max-tokens 200 "Alice Schmidt TechCorp"
+ultramemory search -format json -max-tokens 500 "Alice Schmidt TechCorp"
+
 # Status
 ultramemory status
 ```
@@ -57,10 +61,12 @@ Both `search` and `status` support `-format json` for machine-readable output.
 
 ### search -format json
 
-Each result is emitted as a newline-delimited JSON object (one per line):
+Each result is emitted as a newline-delimited JSON object (one per line).
+Use `-max-tokens N` to cap output size — the stream stops before the budget is exceeded:
 
 ```bash
 ultramemory search -format json "Alice Schmidt TechCorp"
+ultramemory search -format json -max-tokens 500 "Alice Schmidt TechCorp"
 ```
 
 ```json
@@ -128,6 +134,16 @@ Max 1 concurrent gemma3:4b call — resource-friendly on consumer hardware.
 ## Acknowledgements
 
 Inspired by [Graphiti](https://github.com/getzep/graphiti) — a full-featured Python knowledge graph library by [Zep AI](https://github.com/getzep). ultramemory ports the core episode→entity→edge model to a single, dependency-free Go binary.
+
+The graph traversal algorithm is based on **MAGMA: Multi-hop Activation Graph Memory Algorithm**:
+
+> Ge, T. et al. (2026). *MAGMA: Multi-hop Activation Graph Memory Algorithm for Efficient Memory Retrieval in Long-Context LLMs.* arXiv:2601.03236. https://arxiv.org/abs/2601.03236
+
+Key paper contributions implemented here:
+- Transition score `S(n_j|n_i,q) = exp(λ₁·φ(edge_type, intent) + λ₂·cos_sim)` (Eq. 5)
+- Additive score propagation `score_v = score_u · γ + S` (Algorithm 1)
+- Intent classification T_q ∈ {Why, When, Entity} steering edge-type weights
+- Beam search with visited-set cycle prevention, budget-based termination
 
 ## License
 
