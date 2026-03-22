@@ -24,13 +24,19 @@ Types: Person, Organization, Place, Concept, Product, Event
 Empty: {"extracted_entities": []}
 
 Rules:
-- People: full names when available, not pronouns
-- Skip: dates, times, verbs, pronouns (he/she/they/we/I)
+- People: full names when available, not pronouns. Fictional characters are Person, not Concept.
+- Skip: dates, times, verbs, pronouns (he/she/they/we/I), document metadata (license text, publisher credits, release years for ebooks).
 - Deduplicate: same entity mentioned twice = one entry
+- Canonical form: use nominative case. "Deutschen Bahn" → "Deutsche Bahn", "Hamburgs" → "Hamburg", "Müllers" → "Müller"
+- Title case: normalize ALL-CAPS names. "JONATHAN HARKER" → "Jonathan Harker", "COUNT DRACULA" → "Count Dracula"
 
-Example:
+Example 1:
 Input: "Alice works at Google in Berlin since 2020."
-Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person"}, {"name": "Google", "entity_type": "Organization"}, {"name": "Berlin", "entity_type": "Place"}]}`
+Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person"}, {"name": "Google", "entity_type": "Organization"}, {"name": "Berlin", "entity_type": "Place"}]}
+
+Example 2 (German text, canonical forms):
+Input: "Der Chef der Deutschen Bahn sprach über Hamburgs Verkehrsprobleme."
+Output: {"extracted_entities": [{"name": "Deutsche Bahn", "entity_type": "Organization"}, {"name": "Hamburg", "entity_type": "Place"}]}`
 
 const edgeSystem = `Extract relationships between the listed entities. Output JSON only, no explanation.
 
@@ -38,15 +44,33 @@ Output: {"edges": [{"relation_type": "VERB", "source_entity_id": 0, "target_enti
 Empty: {"edges": []}
 
 Rules:
-- relation_type: SCREAMING_SNAKE_CASE (WORKS_AT, FOUNDED, LOCATED_IN, KNOWS, CREATED, PART_OF, USES, IMPLEMENTS)
-- fact: one complete sentence about the relationship
+- relation_type: English SCREAMING_SNAKE_CASE always, even for non-English input text
+- WORKS_AT: employment/job ONLY — NOT for events, conferences, locations, or conflicts
+- fact: one complete English sentence about the relationship
 - valid_at / invalid_at: ISO 8601 date if mentioned in text, otherwise null
 - Only connect entities from the given list using their IDs
 
-Example:
+Relation types (choose most specific):
+People: KNOWS, MARRIED_TO, PARENT_OF, CHILD_OF, COMMANDS, OPPOSES, LOVES, SERVES_UNDER, ALLIED_WITH
+Work: WORKS_AT, LEADS, FOUNDED, CREATED
+Place/Event: BORN_IN, LIVES_IN, LOCATED_IN, FOUGHT_AT, TRAVELED_TO, PARTICIPATED_IN
+Cause: CAUSES, LEADS_TO, RESULTED_IN, TRIGGERED_BY
+Other: PART_OF, USES, OWNS
+
+Example 1 (employment):
 ENTITIES: [0] Alice (Person)  [1] Google (Organization)
 TEXT: "Alice has worked at Google since 2020."
-Output: {"edges": [{"relation_type": "WORKS_AT", "source_entity_id": 0, "target_entity_id": 1, "fact": "Alice works at Google", "valid_at": "2020-01-01T00:00:00Z", "invalid_at": null}]}`
+Output: {"edges": [{"relation_type": "WORKS_AT", "source_entity_id": 0, "target_entity_id": 1, "fact": "Alice works at Google", "valid_at": "2020-01-01T00:00:00Z", "invalid_at": null}]}
+
+Example 2 (event participation — NOT employment):
+ENTITIES: [0] Müller (Person)  [1] World Economic Forum (Event)  [2] Weber (Person)
+TEXT: "Müller debated against Weber at the World Economic Forum in Davos."
+Output: {"edges": [{"relation_type": "PARTICIPATED_IN", "source_entity_id": 0, "target_entity_id": 1, "fact": "Müller participated in the World Economic Forum", "valid_at": null, "invalid_at": null}, {"relation_type": "OPPOSES", "source_entity_id": 0, "target_entity_id": 2, "fact": "Müller opposes Weber", "valid_at": null, "invalid_at": null}]}
+
+Example 3 (causal):
+ENTITIES: [0] Drought (Event)  [1] Crop failure (Event)  [2] Region (Place)
+TEXT: "The prolonged drought led to widespread crop failure across the region."
+Output: {"edges": [{"relation_type": "LEADS_TO", "source_entity_id": 0, "target_entity_id": 1, "fact": "The drought led to crop failure", "valid_at": null, "invalid_at": null}, {"relation_type": "LOCATED_IN", "source_entity_id": 1, "target_entity_id": 2, "fact": "The crop failure occurred in the region", "valid_at": null, "invalid_at": null}]}`
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
