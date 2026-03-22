@@ -13,6 +13,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -97,26 +99,22 @@ func main() {
 		runWorker(ctx, db, client)
 
 	case "search":
-		if len(os.Args) < 3 {
-			fatalf("usage: memory-local search <query>")
+		fs := flag.NewFlagSet("search", flag.ExitOnError)
+		format := fs.String("format", "text", "output format: text|json")
+		fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fatalf("usage: ultramemory search [-format text|json] <query>")
 		}
 		must(client.Ping(ctx), "ping ollama")
-		query := os.Args[2]
-		results, err := graph.Search(ctx, db, client, query, groupID, 10)
+		results, err := graph.Search(ctx, db, client, fs.Arg(0), groupID, 10)
 		must(err, "search")
-
-		if len(results) == 0 {
-			fmt.Println("(no results)")
-			return
-		}
-		fmt.Printf("Results for %q:\n\n", query)
-		for i, r := range results {
-			fmt.Printf("%d. [%s] %s\n   %s\n   score=%.4f\n\n",
-				i+1, r.Type, r.Title, r.Body, r.Score)
-		}
+		printSearch(results, fs.Arg(0), *format)
 
 	case "status":
-		printStatus(ctx, db, groupID)
+		fs := flag.NewFlagSet("status", flag.ExitOnError)
+		format := fs.String("format", "text", "output format: text|json")
+		fs.Parse(os.Args[2:])
+		printStatus(ctx, db, groupID, *format)
 
 	default:
 		usage()
@@ -193,13 +191,58 @@ func runWorker(ctx context.Context, db *store.DB, client *llm.Client) {
 	}
 }
 
-func printStatus(ctx context.Context, db *store.DB, groupID string) {
+// searchHit is the JSON-serialisable presentation of one search result.
+type searchHit struct {
+	Rank  int     `json:"rank"`
+	Type  string  `json:"type"`
+	Title string  `json:"title"`
+	Body  string  `json:"body,omitempty"`
+	Score float64 `json:"score"`
+}
+
+func printSearch(results []graph.SearchResult, query, format string) {
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		for i, r := range results {
+			enc.Encode(searchHit{i + 1, r.Type, r.Title, r.Body, r.Score})
+		}
+		return
+	}
+	if len(results) == 0 {
+		fmt.Println("(no results)")
+		return
+	}
+	fmt.Printf("Results for %q:\n\n", query)
+	for i, r := range results {
+		fmt.Printf("%d. [%s] %s\n   %s\n   score=%.4f\n\n",
+			i+1, r.Type, r.Title, r.Body, r.Score)
+	}
+}
+
+func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 	stats, err := db.QueueStats(ctx)
 	must(err, "queue stats")
 
 	episodes, _ := db.CountEpisodes(ctx, groupID)
 	entities, _ := db.CountEntities(ctx, groupID)
 	edges, _ := db.CountEdges(ctx, groupID)
+
+	if format == "json" {
+		out := struct {
+			Graph struct {
+				Episodes int `json:"episodes"`
+				Entities int `json:"entities"`
+				Edges    int `json:"edges"`
+			} `json:"graph"`
+			Queue map[string]int `json:"queue"`
+		}{}
+		out.Graph.Episodes = episodes
+		out.Graph.Entities = entities
+		out.Graph.Edges = edges
+		out.Queue = stats
+		json.NewEncoder(os.Stdout).Encode(out)
+		return
+	}
 
 	fmt.Printf("── Graph ──────────────────\n")
 	fmt.Printf("  episodes : %d\n", episodes)
