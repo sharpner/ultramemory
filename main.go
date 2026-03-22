@@ -228,6 +228,11 @@ func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 	edges, _ := db.CountEdges(ctx, groupID)
 
 	if format == "json" {
+		for _, s := range []string{"pending", "processing", "done", "failed"} {
+			if _, ok := stats[s]; !ok {
+				stats[s] = 0
+			}
+		}
 		out := struct {
 			Graph struct {
 				Episodes int `json:"episodes"`
