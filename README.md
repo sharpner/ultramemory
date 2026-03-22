@@ -43,13 +43,13 @@ ultramemory status
 
 ## Environment
 
-| Variable        | Default            | Description                      |
-|-----------------|--------------------|----------------------------------|
-| `MEMORY_DB`     | `ultramemory.db`   | SQLite database path             |
-| `OLLAMA_URL`    | `http://localhost:11434` | Ollama base URL            |
-| `EXTRACT_MODEL` | `gemma3:4b`        | Entity/edge extraction model     |
-| `EMBED_MODEL`   | `nomic-embed-text` | Embedding model                  |
-| `GROUP_ID`      | `default`          | Namespace for graph isolation    |
+| Variable           | Default                   | Description                      |
+|--------------------|---------------------------|----------------------------------|
+| `MEMORY_DB`        | `memory-local.db`         | SQLite database path             |
+| `MEMORY_OLLAMA`    | `http://localhost:11434`  | Ollama base URL                  |
+| `MEMORY_MODEL`     | `gemma3:4b`               | Entity/edge extraction model     |
+| `MEMORY_EMBED_MODEL` | `nomic-embed-text`      | Embedding model                  |
+| `MEMORY_GROUP`     | `default`                 | Namespace for graph isolation    |
 
 ## How it works
 
