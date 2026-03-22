@@ -117,3 +117,24 @@ func TestGetNeighbors_Empty(t *testing.T) {
 		t.Errorf("expected 0 neighbors for isolated node, got %v", neighbors)
 	}
 }
+
+func TestGetNeighbors_EdgeName(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	grp := "grp"
+
+	insertEntity(t, db, "alice", "Alice", grp)
+	insertEntity(t, db, "bob", "Bob", grp)
+	insertEdge(t, db, "e1", "alice", "bob", grp)
+
+	neighbors, err := db.GetNeighbors(ctx, "alice", grp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(neighbors) != 1 {
+		t.Fatalf("expected 1 neighbor, got %d", len(neighbors))
+	}
+	if neighbors[0].EdgeName != "KNOWS" {
+		t.Errorf("expected EdgeName=KNOWS, got %q", neighbors[0].EdgeName)
+	}
+}

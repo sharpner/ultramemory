@@ -146,7 +146,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	// ── 4. MAGMA graph traversal ───────────────────────────────────────────────
 	seeds := entitySeeds(results, 5)
 	if len(seeds) > 0 {
-		expanded, err := SpreadMAGMA(ctx, db, seeds, query, groupID, DefaultMAGMAConfig())
+		expanded, err := SpreadMAGMA(ctx, db, seeds, query, qEmb, groupID, DefaultMAGMAConfig())
 		if err == nil {
 			results = mergeMAGMA(results, expanded, limit)
 		}
@@ -170,13 +170,20 @@ func entitySeeds(results []SearchResult, n int) []ActivatedNode {
 	return seeds
 }
 
-// mergeMAGMA adds graph-traversal results not already in results, then re-sorts.
+// mergeMAGMA appends graph-traversal results (not already in results) after the
+// direct matches. Direct matches keep their RRF rank — MAGMA only expands the
+// tail. Re-sorting would demote direct matches because MAGMA activation scores
+// are on a different scale than RRF scores.
 func mergeMAGMA(results []SearchResult, activated []ActivatedNode, limit int) []SearchResult {
 	seen := make(map[string]bool, len(results))
 	for _, r := range results {
 		seen[r.UUID] = true
 	}
+	// activated is already sorted by SpreadMAGMA; append in that order.
 	for _, a := range activated {
+		if len(results) >= limit {
+			break
+		}
 		if seen[a.UUID] {
 			continue
 		}
@@ -188,10 +195,6 @@ func mergeMAGMA(results []SearchResult, activated []ActivatedNode, limit int) []
 			Body:  a.EntityType,
 			Score: a.Activation * 0.8,
 		})
-	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
-	if len(results) > limit {
-		results = results[:limit]
 	}
 	return results
 }

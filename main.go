@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -106,9 +107,10 @@ func main() {
 			fatalf("usage: ultramemory search [-format text|json] <query>")
 		}
 		must(client.Ping(ctx), "ping ollama")
-		results, err := graph.Search(ctx, db, client, fs.Arg(0), groupID, 10)
+		query := strings.Join(fs.Args(), " ")
+		results, err := graph.Search(ctx, db, client, query, groupID, 10)
 		must(err, "search")
-		printSearch(results, fs.Arg(0), *format)
+		printSearch(results, query, *format)
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)

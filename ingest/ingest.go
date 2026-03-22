@@ -41,6 +41,12 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 		return 0, fmt.Errorf("abs root: %w", err)
 	}
 
+	// Resolve pdftotext once — LookPath scans PATH on every call.
+	pdftotextBin, err := exec.LookPath("pdftotext")
+	if err != nil {
+		slog.Warn("pdftotext not found in PATH, PDFs will be skipped")
+	}
+
 	total := 0
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -53,7 +59,7 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 			return skipDir(d.Name())
 		}
 		if isPDF(path) {
-			text, err := extractPDFText(path)
+			text, err := extractPDFText(ctx, pdftotextBin, path)
 			if err != nil {
 				slog.Warn("skip pdf", "path", path, "err", err)
 				return nil
@@ -146,14 +152,12 @@ func isPDF(path string) bool {
 
 // extractPDFText runs pdftotext and returns the extracted plain text.
 // Returns an error if pdftotext is not in PATH or extraction fails.
-func extractPDFText(path string) (string, error) {
-	bin, err := exec.LookPath("pdftotext")
-	if err != nil {
-		slog.Warn("pdftotext not found in PATH, skipping PDF", "path", path)
-		return "", fmt.Errorf("pdftotext not available: %w", err)
+func extractPDFText(ctx context.Context, bin, path string) (string, error) {
+	if bin == "" {
+		return "", fmt.Errorf("pdftotext not available")
 	}
 
-	out, err := exec.Command(bin, path, "-").Output()
+	out, err := exec.CommandContext(ctx, bin, path, "-").Output()
 	if err != nil {
 		return "", fmt.Errorf("pdftotext failed: %w", err)
 	}
