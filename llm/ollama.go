@@ -245,7 +245,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 
 // chat sends a chat completion to Ollama and returns cleaned JSON content + latency.
 // Uses /api/chat (native) instead of /v1/chat/completions to access keep_alive,
-// cache_prompt and num_ctx — taken from nino/claude-files/chat.py optimisations.
+// cache_prompt and num_ctx — Ollama-native params not available via OpenAI-compat layer.
 func (c *Client) chat(ctx context.Context, model, system, user string) (string, time.Duration, error) {
 	body := map[string]any{
 		"model": model,

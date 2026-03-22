@@ -59,3 +59,11 @@ ultramemory status
 4. **Search**: Hybrid FTS5 + cosine similarity with RRF fusion
 
 Max 1 concurrent gemma3:4b call — resource-friendly on consumer hardware.
+
+## Acknowledgements
+
+Inspired by [Graphiti](https://github.com/getzep/graphiti) — a full-featured Python knowledge graph library by [Zep AI](https://github.com/getzep). ultramemory ports the core episode→entity→edge model to a single, dependency-free Go binary.
+
+## License
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
