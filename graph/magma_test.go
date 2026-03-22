@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 
@@ -29,10 +30,10 @@ func TestSpreadMAGMA_BasicHop(t *testing.T) {
 		"alice": {{UUID: "bob", Name: "Bob", EntityType: "person", GroupID: "grp", EdgeFact: "knows alice"}},
 	}
 	seeds := []ActivatedNode{{UUID: "alice", Name: "Alice"}}
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, Threshold: 0.1, MaxNodes: 10, Decay: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
-	// No embeddings, EdgeName="" → EdgeUnknown → φ=0 → S=exp(0)=1.0
-	// newScore = 1.0 * 0.5 * 1.0 = 0.5 > 0.1
+	// EdgeName="" → EdgeUnknown → φ=0 → S=exp(0)=1.0 (no embeddings either)
+	// Additive: score_bob = score_alice*γ + S = 1.0*0.5 + 1.0 = 1.5
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -58,9 +59,10 @@ func TestSpreadMAGMA_Accumulation(t *testing.T) {
 		{UUID: "seed1", Name: "Seed1"},
 		{UUID: "seed2", Name: "Seed2"},
 	}
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, Threshold: 0.01, MaxNodes: 10, Decay: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
-	// No queryEmb, EdgeName="" → S=1.0; each seed contributes 1.0*0.5*1.0=0.5 → total 1.0
+	// EdgeName="" → S=1.0 for both seeds.
+	// Additive: each seed contributes 1.0*0.5+1.0=1.5 → shared total=3.0
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -71,43 +73,40 @@ func TestSpreadMAGMA_Accumulation(t *testing.T) {
 			sharedAct = r.Activation
 		}
 	}
-	// Both seeds contribute 0.5 each → total 1.0
-	if sharedAct < 0.8 {
-		t.Errorf("shared should accumulate from both seeds, got %f (want >= 0.8)", sharedAct)
+	// Both seeds contribute 1.5 each → total ≥ 2.5 (accumulation confirmed).
+	if sharedAct < 2.5 {
+		t.Errorf("shared should accumulate from both seeds, got %f (want >= 2.5)", sharedAct)
 	}
 }
 
-func TestSpreadMAGMA_Threshold(t *testing.T) {
-	// Chain a→b→c→d; deeper nodes fall below threshold.
-	g := mockGraph{
-		"a": {{UUID: "b", Name: "B", EntityType: "x", GroupID: "grp", EdgeFact: "link"}},
-		"b": {{UUID: "c", Name: "C", EntityType: "x", GroupID: "grp", EdgeFact: "link"}},
-		"c": {{UUID: "d", Name: "D", EntityType: "x", GroupID: "grp", EdgeFact: "link"}},
+func TestSpreadMAGMA_Budget(t *testing.T) {
+	// Star graph: center → 10 spokes. MaxNodes=3 should cap the output.
+	spokes := make([]store.NeighborEntity, 10)
+	for i := range spokes {
+		spokes[i] = store.NeighborEntity{
+			UUID:      fmt.Sprintf("n%d", i),
+			Name:      fmt.Sprintf("N%d", i),
+			EntityType: "x",
+			GroupID:   "grp",
+			EdgeFact:  "link",
+		}
 	}
-	seeds := []ActivatedNode{{UUID: "a", Name: "A"}}
-	// EdgeName="" → EdgeUnknown → φ=0 → S=1.0; Decay=0.5:
-	// a=1.0, b=0.5, c=0.25, d=0.125 < Threshold=0.2 → pruned
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 4, Threshold: 0.2, MaxNodes: 10, Decay: 0.5, Lambda2: 0.5}
+	g := mockGraph{"center": spokes}
+	seeds := []ActivatedNode{{UUID: "center", Name: "Center"}}
+	// MaxNodes=3 acts as Budget — limits output regardless of BeamWidth.
+	cfg := MAGMAConfig{BeamWidth: 20, MaxHops: 5, MaxNodes: 3, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range results {
-		if r.Activation < cfg.Threshold {
-			t.Errorf("node %s: activation %f below threshold %f", r.UUID, r.Activation, cfg.Threshold)
-		}
-	}
-	// d (0.125) must not appear
-	for _, r := range results {
-		if r.UUID == "d" {
-			t.Error("node d should be filtered by threshold")
-		}
+	if len(results) > 3 {
+		t.Errorf("MaxNodes=3 Budget should cap output, got %d results", len(results))
 	}
 }
 
 func TestSpreadMAGMA_BeamWidth(t *testing.T) {
-	// center → 5 neighbors; BeamWidth=2 trims the next beam.
+	// center → 5 neighbors; BeamWidth=2 limits frontier expansion.
 	g := mockGraph{
 		"center": {
 			{UUID: "n1", Name: "N1", EntityType: "x", GroupID: "grp", EdgeFact: "link"},
@@ -118,22 +117,21 @@ func TestSpreadMAGMA_BeamWidth(t *testing.T) {
 		},
 	}
 	seeds := []ActivatedNode{{UUID: "center", Name: "Center"}}
-	cfg := MAGMAConfig{BeamWidth: 2, MaxHops: 1, Threshold: 0.01, MaxNodes: 50, Decay: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 2, MaxHops: 1, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// All 5 neighbors receive activation during hop-0 (above threshold 0.01).
+	// At least 2 frontier survivors plus the center seed.
 	if len(results) < 2 {
 		t.Errorf("expected at least 2 results, got %d", len(results))
 	}
 }
 
 func TestSpreadMAGMA_SemanticAffinity(t *testing.T) {
-	// Use 2-D embeddings: query points along X axis.
-	// techcorp aligns with X → high cos_sim; unrelated aligns with Y → low cos_sim.
-	// EdgeName="" → EdgeUnknown → φ=0 → S = exp(λ₂·cos_sim) only.
+	// query → X axis. techcorp aligns with X (cos_sim≈1); unrelated aligns with Y (cos_sim=0).
+	// EdgeName="" → EdgeUnknown → φ=0, so only λ₂·cos_sim contributes.
 	queryEmb := emb(1, 0)
 	g := mockGraph{
 		"alice": {
@@ -144,12 +142,14 @@ func TestSpreadMAGMA_SemanticAffinity(t *testing.T) {
 		},
 	}
 	seeds := []ActivatedNode{{UUID: "alice", Name: "Alice"}}
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, Threshold: 0.01, MaxNodes: 10, Decay: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", queryEmb, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// techcorp: S=exp(0.5*1.0)≈1.649, score=1.0*0.5+1.649=2.149
+	// unrelated: S=exp(0.5*0.0)=1.0,  score=1.0*0.5+1.0=1.5
 	var techScore, unrelScore float64
 	for _, r := range results {
 		switch r.UUID {
@@ -159,14 +159,14 @@ func TestSpreadMAGMA_SemanticAffinity(t *testing.T) {
 			unrelScore = r.Activation
 		}
 	}
-	// techcorp: exp(0.5*1.0)≈1.65, unrelated: exp(0.5*0.0)=1.0
 	if techScore <= unrelScore {
-		t.Errorf("techcorp (%f) should score higher than unrelated (%f) due to embedding similarity", techScore, unrelScore)
+		t.Errorf("techcorp (%f) should score higher than unrelated (%f)", techScore, unrelScore)
 	}
 }
 
 func TestSpreadMAGMA_IntentRouting(t *testing.T) {
-	// CAUSES edge with "why" query → high φ → boosted score vs default query.
+	// CAUSES edge + "why" query → φ(EdgeCausal, IntentWhy)=1.0 → high S.
+	// CAUSES edge + "what" query → φ(EdgeCausal, IntentWhat)=0.5 → lower S.
 	g := mockGraph{
 		"alice": {
 			{UUID: "event", Name: "Event", EntityType: "event", GroupID: "grp",
@@ -174,14 +174,14 @@ func TestSpreadMAGMA_IntentRouting(t *testing.T) {
 		},
 	}
 	seeds := []ActivatedNode{{UUID: "alice", Name: "Alice"}}
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, Threshold: 0.01, MaxNodes: 10, Decay: 0.5, Lambda1: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
-	// "why" query → IntentWhy → φ(EdgeCausal, IntentWhy)=1.0 → S=exp(0.5*1.0)≈1.649
+	// "why" → IntentWhy → S=exp(1.0*1.0)=e≈2.718, score=1.0*0.5+2.718=3.218
 	whyResults, err := SpreadMAGMA(context.Background(), g, seeds, "why did alice cause the event", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// "tell me" query → IntentWhat → φ(EdgeCausal, IntentWhat)=0.5 → S=exp(0.5*0.5)≈1.284
+	// "tell me" → IntentWhat → S=exp(1.0*0.5)≈1.649, score=1.0*0.5+1.649=2.149
 	whatResults, err := SpreadMAGMA(context.Background(), g, seeds, "tell me about alice", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +199,7 @@ func TestSpreadMAGMA_IntentRouting(t *testing.T) {
 		}
 	}
 	if whyScore <= whatScore {
-		t.Errorf("CAUSES edge should score higher with 'why' intent (%f) than 'what' intent (%f)", whyScore, whatScore)
+		t.Errorf("CAUSES edge: 'why' intent (%f) should outscore 'what' intent (%f)", whyScore, whatScore)
 	}
 }
 
@@ -210,7 +210,7 @@ func TestSpreadMAGMA_MaxHops(t *testing.T) {
 		"b": {{UUID: "c", Name: "C", EntityType: "x", GroupID: "grp", EdgeFact: "deep"}},
 	}
 	seeds := []ActivatedNode{{UUID: "a", Name: "A"}}
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, Threshold: 0.01, MaxNodes: 10, Decay: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 1, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", nil, "grp", cfg)
 	if err != nil {
@@ -234,35 +234,37 @@ func TestSpreadMAGMA_EmptySeeds(t *testing.T) {
 }
 
 func TestSpreadMAGMA_NoCycles(t *testing.T) {
-	// Bidirectional graph: alice↔bob. Without visited set, scores would inflate.
+	// Bidirectional: alice↔bob. Without visited set, alice would be re-activated.
 	g := mockGraph{
 		"alice": {{UUID: "bob", Name: "Bob", EntityType: "person", GroupID: "grp", EdgeFact: "knows"}},
 		"bob":   {{UUID: "alice", Name: "Alice", EntityType: "person", GroupID: "grp", EdgeFact: "knows"}},
 	}
 	seeds := []ActivatedNode{{UUID: "alice", Name: "Alice"}}
-	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 3, Threshold: 0.01, MaxNodes: 10, Decay: 0.5, Lambda2: 0.5}
+	cfg := MAGMAConfig{BeamWidth: 10, MaxHops: 3, MaxNodes: 50, Decay: 0.5, Lambda1: 1.0, Lambda2: 0.5}
 
 	results, err := SpreadMAGMA(context.Background(), g, seeds, "", nil, "grp", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Alice is a seed (score=1.0). Bob is 1-hop (score=0.5).
-	// Alice must NOT re-appear as a higher-scored traversal result.
+	// With additive formula: alice=1.0 (seed), bob=1.0*0.5+1.0=1.5 (1-hop).
+	// Bob scoring higher than alice is CORRECT — that is not cycle inflation.
+	// Cycle inflation would be: alice re-processed via bob→alice, raising alice above 1.0.
 	aliceAct := 0.0
-	bobAct := 0.0
+	bobFound := false
 	for _, r := range results {
 		switch r.UUID {
 		case "alice":
 			aliceAct = r.Activation
 		case "bob":
-			bobAct = r.Activation
+			bobFound = true
 		}
 	}
+	// alice must keep her exact seed score: visited set prevents re-processing.
 	if aliceAct != 1.0 {
-		t.Errorf("alice should keep seed score 1.0, got %f", aliceAct)
+		t.Errorf("alice should keep seed score 1.0 (cycle protection), got %f", aliceAct)
 	}
-	if bobAct > aliceAct {
-		t.Errorf("bob (%f) should not outscore seed alice (%f) via cycle inflation", bobAct, aliceAct)
+	if !bobFound {
+		t.Error("bob should be reachable from alice")
 	}
 }
 
@@ -271,20 +273,20 @@ func TestDefaultMAGMAConfig(t *testing.T) {
 	if cfg.BeamWidth != 10 {
 		t.Errorf("BeamWidth: want 10, got %d", cfg.BeamWidth)
 	}
-	if cfg.MaxHops != 3 {
-		t.Errorf("MaxHops: want 3, got %d", cfg.MaxHops)
+	if cfg.MaxHops != 5 {
+		t.Errorf("MaxHops: want 5, got %d", cfg.MaxHops)
 	}
-	if cfg.Threshold != 0.1 {
-		t.Errorf("Threshold: want 0.1, got %f", cfg.Threshold)
+	if cfg.Threshold != 0 {
+		t.Errorf("Threshold: want 0 (paper: budget-based termination), got %f", cfg.Threshold)
 	}
-	if cfg.MaxNodes != 50 {
-		t.Errorf("MaxNodes: want 50, got %d", cfg.MaxNodes)
+	if cfg.MaxNodes != 200 {
+		t.Errorf("MaxNodes: want 200 (paper: Budget=200), got %d", cfg.MaxNodes)
 	}
 	if cfg.Decay != 0.5 {
 		t.Errorf("Decay: want 0.5, got %f", cfg.Decay)
 	}
-	if cfg.Lambda1 != 0.5 {
-		t.Errorf("Lambda1: want 0.5, got %f", cfg.Lambda1)
+	if cfg.Lambda1 != 1.0 {
+		t.Errorf("Lambda1: want 1.0 (paper value), got %f", cfg.Lambda1)
 	}
 	if cfg.Lambda2 != 0.5 {
 		t.Errorf("Lambda2: want 0.5, got %f", cfg.Lambda2)
