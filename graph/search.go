@@ -1,0 +1,146 @@
+package graph
+
+import (
+	"context"
+	"fmt"
+	"sort"
+
+	"github.com/sharpner/ultramemory/llm"
+	"github.com/sharpner/ultramemory/store"
+)
+
+// SearchResult is one item returned from hybrid search.
+type SearchResult struct {
+	Type   string  // "entity" | "edge"
+	UUID   string
+	Title  string  // entity name or edge relation_type
+	Body   string  // edge fact or entity type
+	Score  float64
+}
+
+// Search performs hybrid search (FTS5 + cosine similarity via RRF).
+func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupID string, limit int) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	// ── 1. FTS search ─────────────────────────────────────────────────────────
+	entFTS, err := db.SearchEntitiesFTS(ctx, query, groupID, limit*2)
+	if err != nil {
+		return nil, fmt.Errorf("entity FTS: %w", err)
+	}
+	edgeFTS, err := db.SearchEdgesFTS(ctx, query, groupID, limit*2)
+	if err != nil {
+		return nil, fmt.Errorf("edge FTS: %w", err)
+	}
+
+	// ── 2. Vector search ──────────────────────────────────────────────────────
+	qEmb, err := client.Embed(ctx, query)
+	if err != nil {
+		// Non-fatal: fall back to FTS-only.
+		qEmb = nil
+	}
+
+	type scored struct {
+		uuid  string
+		score float64
+	}
+
+	var entityVec, edgeVec []scored
+
+	if len(qEmb) > 0 {
+		entities, _ := db.AllEntitiesWithEmbeddings(ctx, groupID)
+		for _, e := range entities {
+			sim := store.CosineSimilarity(qEmb, e.Embedding)
+			if sim > 0.3 {
+				entityVec = append(entityVec, scored{e.UUID, sim})
+			}
+		}
+		sort.Slice(entityVec, func(i, j int) bool { return entityVec[i].score > entityVec[j].score })
+		if len(entityVec) > limit*2 {
+			entityVec = entityVec[:limit*2]
+		}
+
+		edges, _ := db.AllEdgesWithEmbeddings(ctx, groupID)
+		for _, e := range edges {
+			sim := store.CosineSimilarity(qEmb, e.Embedding)
+			if sim > 0.3 {
+				edgeVec = append(edgeVec, scored{e.UUID, sim})
+			}
+		}
+		sort.Slice(edgeVec, func(i, j int) bool { return edgeVec[i].score > edgeVec[j].score })
+		if len(edgeVec) > limit*2 {
+			edgeVec = edgeVec[:limit*2]
+		}
+	}
+
+	// ── 3. RRF fusion ─────────────────────────────────────────────────────────
+	const k = 60
+	rrf := map[string]float64{}
+
+	for rank, e := range entFTS {
+		rrf["ent:"+e.UUID] += 1.0 / float64(k+rank+1)
+	}
+	for rank, e := range edgeFTS {
+		rrf["edg:"+e.UUID] += 1.0 / float64(k+rank+1)
+	}
+	for rank, s := range entityVec {
+		rrf["ent:"+s.uuid] += 1.0 / float64(k+rank+1)
+	}
+	for rank, s := range edgeVec {
+		rrf["edg:"+s.uuid] += 1.0 / float64(k+rank+1)
+	}
+
+	// Build index maps for fast lookup.
+	entByUUID := map[string]store.Entity{}
+	for _, e := range entFTS {
+		entByUUID[e.UUID] = e
+	}
+	edgByUUID := map[string]store.Edge{}
+	for _, e := range edgeFTS {
+		edgByUUID[e.UUID] = e
+	}
+
+	type rfentry struct {
+		key   string
+		score float64
+	}
+	entries := make([]rfentry, 0, len(rrf))
+	for k, v := range rrf {
+		entries = append(entries, rfentry{k, v})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].score > entries[j].score })
+
+	var results []SearchResult
+	for _, en := range entries {
+		if len(results) >= limit {
+			break
+		}
+		key := en.key
+		switch {
+		case len(key) > 4 && key[:4] == "ent:":
+			uid := key[4:]
+			if e, ok := entByUUID[uid]; ok {
+				results = append(results, SearchResult{
+					Type:  "entity",
+					UUID:  uid,
+					Title: e.Name,
+					Body:  e.EntityType,
+					Score: en.score,
+				})
+			}
+		case len(key) > 4 && key[:4] == "edg:":
+			uid := key[4:]
+			if e, ok := edgByUUID[uid]; ok {
+				results = append(results, SearchResult{
+					Type:  "edge",
+					UUID:  uid,
+					Title: e.Name,
+					Body:  e.Fact,
+					Score: en.score,
+				})
+			}
+		}
+	}
+	return results, nil
+}
