@@ -510,7 +510,29 @@ Code:
 
 **v27 Ergebnisse** ausstehend — qa-only auf v26-fresh.db mit neuem Binary.
 
-**v26-fresh Ergebnisse** ausstehend (Fresh Ingestion + Community Reports + Temporal Decay, läuft).
+**v26-fresh Ergebnisse:**
+
+| Category | F1 | EM | Delta vs v23 |
+|----------|-----|-----|-------------|
+| single-hop | 33.6% | 6.2% | -3.0% |
+| multi-hop | 39.7% | 2.7% | -2.5% |
+| temporal | 9.4% | 0.0% | -1.9% |
+| open-domain | 54.6% | 20.0% | -2.1% |
+| adversarial | 44.0% | 19.1% | +0.3% |
+| **OVERALL** | **43.0%** | **13.1%** | **-1.7%** |
+
+Duration: 33m6s. **Community Reports SCHADEN: -1.3%** über Temporal-Decay-Regression (-0.4%) hinaus.
+
+**Diagnose**: Louvain Community Detection gruppiert ALLE semantisch ähnlichen Entities — incl. Musik-Artists
+(Ed Sheeran, Mozart, Bach, Sara Bareilles → Community 9). Der LLM-generierte Report war falsch:
+"Sara Bareilles, a fan of Ed Sheeran and Bach's 'Perfect,'..." — Context Pollution für jede Frage mit Musik-Kontext.
+
+**Fix (v28)**: Community Reports nur für Person-dominierte Communities (≥3 Personen).
+Für LoCoMo: 4→1 Reports (nur Community 0 mit Caroline+Freunden bleibt).
+Schlechte Reports aus v26-fresh.db manuell gelöscht.
+
+**v27 Ergebnisse** ausstehend (MAGMA Episode Backfill, qa-only auf v26-fresh.db, mixed community reports).
+**v28 Ergebnisse** ausstehend (MAGMA Episode Backfill + 1 guter Community Report).
 
 
 
