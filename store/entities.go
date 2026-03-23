@@ -107,6 +107,43 @@ func (d *DB) AllEntitiesWithEmbeddings(ctx context.Context, groupID string) ([]E
 	return out, rows.Err()
 }
 
+// EntitiesForEpisodes returns entities linked to any of the given episode UUIDs
+// via the entity_episodes join table. Used for episode→entity MAGMA seed expansion:
+// FTS episode hits often link to entities not directly matched by entity FTS.
+func (d *DB) EntitiesForEpisodes(ctx context.Context, episodeUUIDs []string, groupID string) ([]Entity, error) {
+	if len(episodeUUIDs) == 0 {
+		return nil, nil
+	}
+	ph := placeholders(len(episodeUUIDs))
+	args := make([]any, 0, len(episodeUUIDs)+1)
+	for _, u := range episodeUUIDs {
+		args = append(args, u)
+	}
+	args = append(args, groupID)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT DISTINCT e.uuid, e.name, e.entity_type, e.embedding, e.description
+		FROM entities e
+		JOIN entity_episodes ee ON ee.entity_uuid = e.uuid
+		WHERE ee.episode_uuid IN (`+ph+`) AND e.group_id = ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Entity
+	for rows.Next() {
+		var e Entity
+		var blob []byte
+		if err := rows.Scan(&e.UUID, &e.Name, &e.EntityType, &blob, &e.Description); err != nil {
+			return nil, err
+		}
+		e.GroupID = groupID
+		e.Embedding = DecodeEmbedding(blob)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // SearchEntitiesFTS performs fulltext search on entity names.
 func (d *DB) SearchEntitiesFTS(ctx context.Context, query, groupID string, limit int) ([]Entity, error) {
 	rows, err := d.sql.QueryContext(ctx, `

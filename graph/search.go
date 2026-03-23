@@ -108,8 +108,32 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 
 	// ── 3. MAGMA graph traversal (before RRF — becomes a third signal) ───────
-	// Seeds from FTS entity hits (lexical anchor, most specific matches).
+	// Primary seeds: FTS entity hits (lexical anchor, most specific name matches).
+	// Secondary seeds: entities linked to top FTS episode hits (Synapse §3.1 episodic bridging).
+	// Episode→entity expansion helps when the question references a fact by object/event name
+	// rather than person name (e.g. "necklace" episode links to "grandma" entity → MAGMA seed).
 	seeds := ftsEntitySeeds(entFTS, 5)
+	if len(epFTS) > 0 {
+		epUUIDs := make([]string, 0, 3)
+		for i, ep := range epFTS {
+			if i >= 3 {
+				break
+			}
+			epUUIDs = append(epUUIDs, ep.UUID)
+		}
+		if epLinked, err := db.EntitiesForEpisodes(ctx, epUUIDs, groupID); err == nil {
+			existing := map[string]bool{}
+			for _, s := range seeds {
+				existing[s.UUID] = true
+			}
+			for _, e := range epLinked {
+				if !existing[e.UUID] && len(seeds) < 10 {
+					seeds = append(seeds, ActivatedNode{UUID: e.UUID, Name: e.Name, EntityType: e.EntityType})
+					existing[e.UUID] = true
+				}
+			}
+		}
+	}
 	var magmaRanked []ActivatedNode
 	if len(seeds) > 0 {
 		expanded, err := SpreadMAGMA(ctx, db, seeds, query, qEmb, groupID, DefaultMAGMAConfig())
