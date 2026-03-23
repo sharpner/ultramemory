@@ -113,7 +113,7 @@ func main() {
 		fs := flag.NewFlagSet("search", flag.ExitOnError)
 		format    := fs.String("format",     "text", "output format: text|json")
 		maxTokens := fs.Int("max-tokens",    0,      "token budget for output (0 = unlimited)")
-		fs.Parse(os.Args[2:])
+		_ = fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
 			fatalf("usage: ultramemory search [-format text|json] [-max-tokens N] <query>")
 		}
@@ -126,7 +126,7 @@ func main() {
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		format := fs.String("format", "text", "output format: text|json")
-		fs.Parse(os.Args[2:])
+		_ = fs.Parse(os.Args[2:])
 		printStatus(ctx, db, groupID, *format)
 
 	default:
@@ -228,7 +228,7 @@ func printSearch(results []graph.SearchResult, query, format string, maxTokens i
 			if maxTokens > 0 && used+cost > maxTokens {
 				break
 			}
-			enc.Encode(searchHit{i + 1, r.Type, r.Title, r.Body, r.Score, r.Source})
+			_ = enc.Encode(searchHit{i + 1, r.Type, r.Title, r.Body, r.Score, r.Source})
 			used += cost
 		}
 		return

@@ -23,13 +23,14 @@ type Edge struct {
 // Deduplicates by (source_uuid, target_uuid, name, group_id).
 func (d *DB) UpsertEdge(ctx context.Context, e Edge) error {
 	var existing string
-	err := d.sql.QueryRowContext(ctx,
+	_ = d.sql.QueryRowContext(ctx,
 		`SELECT uuid FROM edges
 		 WHERE source_uuid = ? AND target_uuid = ? AND name = ? AND group_id = ?
 		 LIMIT 1`,
 		e.SourceUUID, e.TargetUUID, e.Name, e.GroupID,
 	).Scan(&existing)
 
+	var err error
 	var embBlob []byte
 	if len(e.Embedding) > 0 {
 		embBlob = EncodeEmbedding(e.Embedding)
@@ -87,7 +88,7 @@ func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit in
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []Edge
 	for rows.Next() {
@@ -114,7 +115,7 @@ func (d *DB) AllEdgesWithEmbeddings(ctx context.Context, groupID string) ([]Edge
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []Edge
 	for rows.Next() {

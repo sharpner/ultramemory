@@ -190,7 +190,7 @@ func (w *Walker) pdfToImages(ctx context.Context, pdfPath string) ([]string, fun
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("temp dir: %w", err)
 	}
-	cleanup := func() { os.RemoveAll(tmpDir) }
+	cleanup := func() { _ = os.RemoveAll(tmpDir) }
 
 	prefix := filepath.Join(tmpDir, "page")
 	if _, err := exec.CommandContext(ctx, w.pdftoppmBin,

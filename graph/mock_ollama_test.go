@@ -30,7 +30,7 @@ func (m *mockServer) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
 	})
 
 	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +40,7 @@ func (m *mockServer) handler() http.Handler {
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 
 		// Edge extraction prompts contain "relation_type" in the system message.
 		content := m.entitiesJSON
@@ -51,7 +51,7 @@ func (m *mockServer) handler() http.Handler {
 			}
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"message": map[string]string{"role": "assistant", "content": content},
 			"done":    true,
 		})
@@ -59,7 +59,7 @@ func (m *mockServer) handler() http.Handler {
 
 	mux.HandleFunc("/api/embeddings", func(w http.ResponseWriter, _ *http.Request) {
 		// Zero vector → cosine similarity = 0 → no semantic merging in tests.
-		json.NewEncoder(w).Encode(map[string]any{"embedding": make([]float32, 4)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": make([]float32, 4)})
 	})
 
 	mux.HandleFunc("/api/generate", func(w http.ResponseWriter, _ *http.Request) {

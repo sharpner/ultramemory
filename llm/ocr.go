@@ -82,7 +82,7 @@ func (c *Client) ocrRequest(ctx context.Context, imageBytes []byte, prompt strin
 	if err != nil {
 		return "", fmt.Errorf("ocr request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {

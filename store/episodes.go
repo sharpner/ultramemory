@@ -57,7 +57,7 @@ func (d *DB) FirstEntitySource(ctx context.Context, entityUUID, groupID string) 
 		WHERE ee.entity_uuid = ? AND ep.group_id = ?
 		LIMIT 1`,
 		entityUUID, groupID,
-	).Scan(&src)
+	).Scan(&src) //nolint:errcheck
 	return src
 }
 
@@ -71,7 +71,7 @@ func (d *DB) FirstEdgeSource(ctx context.Context, edgeUUID string) string {
 		)
 		LIMIT 1`,
 		edgeUUID,
-	).Scan(&src)
+	).Scan(&src) //nolint:errcheck
 	return src
 }
 

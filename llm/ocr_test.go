@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-const testScanURL = "https://www.csusm.edu/iits/services/accessibility/images/guideimgs/double-page-scan.png"
 
 func skipIfNoOllamaOCR(t *testing.T, c *Client) {
 	t.Helper()

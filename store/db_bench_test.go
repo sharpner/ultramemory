@@ -12,7 +12,7 @@ func BenchmarkUpsertEntity(b *testing.B) {
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.UpsertEntity(ctx, Entity{
+		_, _ = db.UpsertEntity(ctx, Entity{
 			UUID:       fmt.Sprintf("e%d", i),
 			Name:       fmt.Sprintf("Entity Number %d", i),
 			EntityType: "person",
@@ -25,7 +25,7 @@ func BenchmarkSearchEntitiesFTS(b *testing.B) {
 	db := openTestDB(b)
 	ctx := context.Background()
 	for i := 0; i < 100; i++ {
-		db.UpsertEntity(ctx, Entity{
+		_, _ = db.UpsertEntity(ctx, Entity{
 			UUID:       fmt.Sprintf("e%d", i),
 			Name:       fmt.Sprintf("Person %d", i),
 			EntityType: "person",
@@ -34,7 +34,7 @@ func BenchmarkSearchEntitiesFTS(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.SearchEntitiesFTS(ctx, "Person", "g", 10)
+		_, _ = db.SearchEntitiesFTS(ctx, "Person", "g", 10)
 	}
 }
 
@@ -45,7 +45,7 @@ func BenchmarkConcurrentReadWhileWriting(b *testing.B) {
 	ctx := context.Background()
 
 	for i := 0; i < 50; i++ {
-		db.UpsertEntity(ctx, Entity{
+		_, _ = db.UpsertEntity(ctx, Entity{
 			UUID:       fmt.Sprintf("seed%d", i),
 			Name:       fmt.Sprintf("Seed Person %d", i),
 			EntityType: "person",
@@ -63,7 +63,7 @@ func BenchmarkConcurrentReadWhileWriting(b *testing.B) {
 				case <-stop:
 					return
 				default:
-					db.SearchEntitiesFTS(ctx, "Seed", "g", 10)
+					_, _ = db.SearchEntitiesFTS(ctx, "Seed", "g", 10)
 					readCount.Add(1)
 				}
 			}
@@ -72,7 +72,7 @@ func BenchmarkConcurrentReadWhileWriting(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		db.UpsertEntity(ctx, Entity{
+		_, _ = db.UpsertEntity(ctx, Entity{
 			UUID:       fmt.Sprintf("w%d", i),
 			Name:       fmt.Sprintf("Writer %d", i),
 			EntityType: "person",
