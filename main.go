@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sharpner/ultramemory/bench"
 	"github.com/sharpner/ultramemory/graph"
 	"github.com/sharpner/ultramemory/ingest"
 	"github.com/sharpner/ultramemory/llm"
@@ -122,6 +123,22 @@ func main() {
 		results, err := graph.Search(ctx, db, client, query, groupID, 10)
 		must(err, "search")
 		printSearch(results, query, *format, *maxTokens)
+
+	case "bench":
+		fs := flag.NewFlagSet("bench", flag.ExitOnError)
+		limit := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fatalf("usage: ultramemory bench [-limit N] <locomo10.json>")
+		}
+		must(client.Ping(ctx), "ping ollama")
+		fmt.Fprintln(os.Stderr, "Warming up model…")
+		if err := client.Warmup(ctx); err != nil {
+			slog.Warn("warmup failed", "err", err)
+		}
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, resolveThreshold, *limit)
+		must(err, "bench")
+		bench.PrintResult(result)
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
@@ -304,6 +321,7 @@ Commands:
   ingest <path>   queue all text files for processing
   worker          process queued jobs (blocking)
   search <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
+  bench  <json>   evaluate against LoCoMo benchmark (flags: -limit N)
   status          show queue and graph statistics
 
 Environment:

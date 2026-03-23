@@ -331,6 +331,61 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 	return strings.TrimSpace(content), latency, nil
 }
 
+// Answer sends a free-text prompt to the LLM and returns the response.
+// Unlike extraction methods, this does not force JSON output format.
+func (c *Client) Answer(ctx context.Context, system, user string) (string, error) {
+	body := map[string]any{
+		"model": c.extractModel,
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+		"stream":       false,
+		"keep_alive":   -1,
+		"cache_prompt": true,
+		"options": map[string]any{
+			"num_ctx":     4096,
+			"num_predict": 128,
+			"temperature": 0,
+		},
+	}
+
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/chat", bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, truncate(string(data), 80))
+	}
+
+	var cr struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(data, &cr); err != nil {
+		return "", fmt.Errorf("unmarshal: %w", err)
+	}
+
+	content := cr.Message.Content
+	content = thinkRe.ReplaceAllString(content, "")
+	return strings.TrimSpace(content), nil
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

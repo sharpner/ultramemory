@@ -11,10 +11,10 @@ import (
 
 // SearchResult is one item returned from hybrid search.
 type SearchResult struct {
-	Type   string  // "entity" | "edge"
+	Type   string  // "entity" | "edge" | "episode"
 	UUID   string
-	Title  string  // entity name or edge relation_type
-	Body   string  // edge fact or entity type
+	Title  string  // entity name, edge relation_type, or episode source
+	Body   string  // edge fact, entity type, or episode content snippet
 	Score  float64
 	Source string  // originating source file
 }
@@ -33,6 +33,10 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	edgeFTS, err := db.SearchEdgesFTS(ctx, query, groupID, limit*2)
 	if err != nil {
 		return nil, fmt.Errorf("edge FTS: %w", err)
+	}
+	epFTS, err := db.SearchEpisodesFTS(ctx, query, groupID, limit*2)
+	if err != nil {
+		return nil, fmt.Errorf("episode FTS: %w", err)
 	}
 
 	// ── 2. Vector search ──────────────────────────────────────────────────────
@@ -57,6 +61,10 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	edgByUUID := map[string]store.Edge{}
 	for _, e := range edgeFTS {
 		edgByUUID[e.UUID] = e
+	}
+	epByUUID := map[string]store.Episode{}
+	for _, e := range epFTS {
+		epByUUID[e.UUID] = e
 	}
 
 	var entityVec, edgeVec []scored
@@ -105,6 +113,9 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	for rank, s := range edgeVec {
 		rrf["edg:"+s.uuid] += 1.0 / float64(k+rank+1)
 	}
+	for rank, e := range epFTS {
+		rrf["ep:"+e.UUID] += 1.0 / float64(k+rank+1)
+	}
 
 	type rfentry struct {
 		key   string
@@ -143,6 +154,18 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 					Title: e.Name,
 					Body:  e.Fact,
 					Score: en.score,
+				})
+			}
+		case len(key) > 3 && key[:3] == "ep:":
+			uid := key[3:]
+			if e, ok := epByUUID[uid]; ok {
+				results = append(results, SearchResult{
+					Type:   "episode",
+					UUID:   uid,
+					Title:  e.Source,
+					Body:   e.Content,
+					Score:  en.score,
+					Source: e.Source,
 				})
 			}
 		}

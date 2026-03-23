@@ -176,7 +176,7 @@ func fts5Query(q string) string {
 		// Strip FTS5 special chars to avoid syntax errors.
 		w = strings.Map(func(r rune) rune {
 			switch r {
-			case '"', '\'', '(', ')', '*', '^', '-', '+', ':', '.':
+			case '"', '\'', '(', ')', '*', '^', '-', '+', ':', '.', '?', '!', ',', ';', '{', '}', '[', ']', '~', '&', '|', '@', '#', '$', '%', '/':
 				return -1
 			}
 			return r

@@ -75,6 +75,36 @@ func (d *DB) FirstEdgeSource(ctx context.Context, edgeUUID string) string {
 	return src
 }
 
+// SearchEpisodesFTS performs fulltext search over episode content.
+func (d *DB) SearchEpisodesFTS(ctx context.Context, query, groupID string, limit int) ([]Episode, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT e.uuid, e.content, e.source, e.embedding
+		FROM episodes_fts f
+		JOIN episodes e ON e.uuid = f.uuid
+		WHERE episodes_fts MATCH ? AND e.group_id = ?
+		ORDER BY rank
+		LIMIT ?`,
+		fts5Query(query), groupID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Episode
+	for rows.Next() {
+		var ep Episode
+		var blob []byte
+		if err := rows.Scan(&ep.UUID, &ep.Content, &ep.Source, &blob); err != nil {
+			return nil, err
+		}
+		ep.GroupID = groupID
+		ep.Embedding = DecodeEmbedding(blob)
+		out = append(out, ep)
+	}
+	return out, rows.Err()
+}
+
 // CountEpisodes returns the total episode count for a group.
 func (d *DB) CountEpisodes(ctx context.Context, groupID string) (int, error) {
 	var n int
