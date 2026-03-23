@@ -12,6 +12,12 @@ ollama pull gemma3:4b
 ollama pull nomic-embed-text
 ```
 
+By default Ollama keeps models loaded in VRAM indefinitely. Set a keep-alive timeout to free GPU memory when idle:
+
+```bash
+OLLAMA_KEEP_ALIVE=30m ollama serve
+```
+
 ### Optional: PDF support
 
 | Tool | Purpose | Install |
