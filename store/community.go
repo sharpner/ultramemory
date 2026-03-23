@@ -203,11 +203,13 @@ type CommunityInput struct {
 }
 
 // CommunityInputsForGroup returns CommunityInput for all communities in a group
-// that have at least minMembers entities. Used by the report generation step.
+// that have at least minMembers Person entities. Used by the report generation step.
+// Only Person-dominated communities produce meaningful group summaries —
+// concept/product communities generate inaccurate, context-polluting reports.
 func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMembers int) ([]CommunityInput, error) {
-	// Load community → entity names
+	// Load community → entity names, but only count Person entities for the threshold.
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT community_id, name FROM entities WHERE group_id = ? AND community_id >= 0 ORDER BY community_id`,
+		`SELECT community_id, name, entity_type FROM entities WHERE group_id = ? AND community_id >= 0 ORDER BY community_id`,
 		groupID)
 	if err != nil {
 		return nil, err
@@ -215,13 +217,17 @@ func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMem
 	defer rows.Close()
 
 	communityNames := map[int][]string{}
+	communityPersonCount := map[int]int{}
 	for rows.Next() {
 		var cid int
-		var name string
-		if err := rows.Scan(&cid, &name); err != nil {
+		var name, etype string
+		if err := rows.Scan(&cid, &name, &etype); err != nil {
 			return nil, err
 		}
 		communityNames[cid] = append(communityNames[cid], name)
+		if etype == "Person" {
+			communityPersonCount[cid]++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -229,7 +235,9 @@ func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMem
 
 	var inputs []CommunityInput
 	for cid, names := range communityNames {
-		if len(names) < minMembers {
+		// Require at least minMembers Person entities.
+		// Communities dominated by concepts/products generate misleading reports.
+		if communityPersonCount[cid] < minMembers {
 			continue
 		}
 		// Load top 5 edge facts involving community members.
