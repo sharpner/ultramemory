@@ -11,12 +11,13 @@ import (
 
 // SearchResult is one item returned from hybrid search.
 type SearchResult struct {
-	Type   string  // "entity" | "edge" | "episode"
-	UUID   string
-	Title  string  // entity name, edge relation_type, or episode source
-	Body   string  // edge fact, entity type, or episode content snippet
-	Score  float64
-	Source string  // originating source file
+	Type    string  // "entity" | "edge" | "episode"
+	UUID    string
+	Title   string  // entity name, edge relation_type, or episode source
+	Body    string  // edge fact, entity type, or episode content snippet
+	Score   float64
+	Source  string  // originating source file
+	ValidAt string  // ISO 8601 date when edge fact became true (empty if unknown)
 }
 
 // Search performs triple-signal hybrid search (FTS + vector + MAGMA graph via RRF).
@@ -225,12 +226,17 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		case len(key) > 4 && key[:4] == "edg:":
 			uid := key[4:]
 			if e, ok := edgByUUID[uid]; ok {
+				validAt := ""
+				if e.ValidAt != nil {
+					validAt = *e.ValidAt
+				}
 				results = append(results, SearchResult{
-					Type:  "edge",
-					UUID:  uid,
-					Title: e.Name,
-					Body:  e.Fact,
-					Score: en.score,
+					Type:    "edge",
+					UUID:    uid,
+					Title:   e.Name,
+					Body:    e.Fact,
+					Score:   en.score,
+					ValidAt: validAt,
 				})
 			}
 		case len(key) > 3 && key[:3] == "ep:":

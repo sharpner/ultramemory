@@ -411,9 +411,18 @@ func formatSession(s Session) string {
 	return b.String()
 }
 
-// sessionTag extracts a readable session label from a source path.
-// "locomo/conv-26/session_7" → "[session_7]", "" otherwise.
-func sessionTag(source string) string {
+// temporalTag produces a readable time label for an edge fact in context.
+// Prefers validAt ISO date ("2023-05-08T00:00:00Z" → "[8 May 2023]") for precise
+// temporal grounding. Falls back to session tag from source path.
+func temporalTag(validAt, source string) string {
+	if validAt != "" {
+		t, err := time.Parse(time.RFC3339, validAt)
+		if err == nil {
+			return "[" + t.Format("2 Jan 2006") + "] "
+		}
+		// Non-RFC3339 but non-empty — use as-is trimmed.
+		return "[" + strings.TrimSpace(validAt) + "] "
+	}
 	if source == "" {
 		return ""
 	}
@@ -441,7 +450,7 @@ func formatContext(results []graph.SearchResult) string {
 			continue
 		}
 		n++
-		fmt.Fprintf(&b, "%d. %s%s\n", n, sessionTag(r.Source), r.Body)
+		fmt.Fprintf(&b, "%d. %s%s\n", n, temporalTag(r.ValidAt, r.Source), r.Body)
 	}
 	for _, r := range results {
 		if r.Type != "episode" {
