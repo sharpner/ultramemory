@@ -153,7 +153,7 @@ func TestResolveOrCreate_SemanticDedup(t *testing.T) {
 	}
 
 	// "Harker Jonathan" with cosine ~0.99 against A — must resolve to A.
-	uuidB, err := ext.resolveOrCreate(ctx, "Harker Jonathan", "person", "g", []float32{0.99, 0.14, 0, 0})
+	uuidB, err := ext.resolveOrCreate(ctx, "Harker Jonathan", "person", "g", []float32{0.99, 0.14, 0, 0}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestResolveOrCreate_TypeGuard(t *testing.T) {
 	}
 
 	// Same name pattern + similar embedding but different entity_type — must not merge.
-	uuidB, err := ext.resolveOrCreate(ctx, "Harker Jonathan", "tool", "g", []float32{0.99, 0.14, 0, 0})
+	uuidB, err := ext.resolveOrCreate(ctx, "Harker Jonathan", "tool", "g", []float32{0.99, 0.14, 0, 0}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestResolveOrCreate_NoEmbeddingFallsThrough(t *testing.T) {
 	}
 
 	// nil embedding → FTS resolution skipped → new entity.
-	uuidB, err := ext.resolveOrCreate(ctx, "Harker Jonathan", "person", "g", nil)
+	uuidB, err := ext.resolveOrCreate(ctx, "Harker Jonathan", "person", "g", nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

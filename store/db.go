@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS entities (
 	entity_type TEXT NOT NULL,
 	group_id    TEXT NOT NULL DEFAULT 'default',
 	created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-	embedding   BLOB
+	embedding    BLOB,
+	description  TEXT NOT NULL DEFAULT '',
+	community_id INTEGER NOT NULL DEFAULT -1
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
@@ -109,6 +111,15 @@ CREATE INDEX IF NOT EXISTS idx_edges_tgt_grp
 
 CREATE INDEX IF NOT EXISTS idx_edges_group
 	ON edges(group_id);
+
+CREATE INDEX IF NOT EXISTS idx_entities_community
+	ON entities(group_id, community_id);
+`
+
+// migrations runs after schema init to add columns to existing databases.
+const migrations = `
+ALTER TABLE entities ADD COLUMN community_id INTEGER NOT NULL DEFAULT -1;
+ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT '';
 `
 
 // DB wraps a SQLite database connection.
@@ -129,6 +140,8 @@ func Open(path string) (*DB, error) {
 	if _, err := conn.ExecContext(context.Background(), schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// Best-effort migrations — ALTER TABLE fails silently if column exists.
+	_, _ = conn.ExecContext(context.Background(), migrations)
 	return &DB{sql: conn}, nil
 }
 

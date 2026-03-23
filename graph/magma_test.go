@@ -259,9 +259,13 @@ func TestSpreadMAGMA_NoCycles(t *testing.T) {
 			bobFound = true
 		}
 	}
-	// alice must keep her exact seed score: visited set prevents re-processing.
-	if aliceAct != 1.0 {
-		t.Errorf("alice should keep seed score 1.0 (cycle protection), got %f", aliceAct)
+	// Cycle protection: alice's base score must not be inflated above 1.0.
+	// Lateral inhibition may reduce it below 1.0 (suppressed by stronger bob).
+	if aliceAct > 1.0 {
+		t.Errorf("alice seed score should not exceed 1.0 (cycle protection), got %f", aliceAct)
+	}
+	if aliceAct <= 0 {
+		t.Errorf("alice should survive lateral inhibition, got %f", aliceAct)
 	}
 	if !bobFound {
 		t.Error("bob should be reachable from alice")

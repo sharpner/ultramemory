@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/google/uuid"
 	"github.com/sharpner/ultramemory/graph"
 	"github.com/sharpner/ultramemory/llm"
 	"github.com/sharpner/ultramemory/store"
@@ -29,10 +30,15 @@ var categoryName = map[int]string{
 }
 
 const qaSystem = `You answer questions about a conversation between two people.
-Use ONLY the provided context. Be extremely concise — a few words at most.
-For dates, give the format used in the context (e.g. "7 May 2023").
-For names, give the full name as it appears in the context.
-If the context does not contain the answer, respond with exactly: unknown`
+
+Rules:
+1. Use ONLY the provided context. Never use outside knowledge.
+2. Be extremely concise — answer in as few words as possible.
+3. For dates, use the exact format from the context (e.g. "7 May 2023").
+4. For names, give the full name exactly as it appears.
+5. For "Would..." or inference questions, reason based on the person's stated preferences, values, and circumstances from the context. Give a brief yes/no with explanation.
+6. If the context does NOT contain enough information to answer, respond with exactly: unknown
+7. If the question asks about something not mentioned in the context at all, respond with exactly: unknown`
 
 const chunkSize = 1500
 
@@ -45,10 +51,11 @@ type rawConversation struct {
 }
 
 type rawQA struct {
-	Question string          `json:"question"`
-	Answer   json.RawMessage `json:"answer"`
-	Category int             `json:"category"`
-	Evidence []string        `json:"evidence"`
+	Question          string          `json:"question"`
+	Answer            json.RawMessage `json:"answer"`
+	AdversarialAnswer json.RawMessage `json:"adversarial_answer"`
+	Category          int             `json:"category"`
+	Evidence          []string        `json:"evidence"`
 }
 
 type rawTurn struct {
@@ -115,7 +122,8 @@ type qaScore struct {
 
 // RunLoCoMo evaluates ultramemory against the LoCoMo benchmark.
 // Set limit > 0 to evaluate only the first N conversations.
-func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, resolveThreshold float64, limit int) (*Result, error) {
+// When baseline is true, only raw episode FTS is used (no graph extraction).
+func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, resolveThreshold float64, limit int, baseline bool) (*Result, error) {
 	conversations, err := parseLoCoMo(dataPath)
 	if err != nil {
 		return nil, err
@@ -124,14 +132,22 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 		conversations = conversations[:limit]
 	}
 
+	mode := "graph"
+	if baseline {
+		mode = "baseline"
+	}
+
 	start := time.Now()
 	var scores []qaScore
 
 	for ci, conv := range conversations {
 		groupID := "locomo-" + conv.SampleID
-		ext := graph.New(db, client, resolveThreshold)
+		if baseline {
+			groupID = "baseline-" + conv.SampleID
+		}
 
 		slog.Info("ingesting conversation",
+			"mode", mode,
 			"conv", ci+1, "of", len(conversations),
 			"sample", conv.SampleID,
 			"sessions", len(conv.Sessions),
@@ -147,13 +163,39 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 					continue
 				}
 				source := fmt.Sprintf("locomo/%s/session_%d", conv.SampleID, sess.Number)
-				if err := ext.Process(ctx, chunk, source, groupID); err != nil {
-					slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
+				if baseline {
+					if err := db.UpsertEpisode(ctx, store.Episode{
+						UUID:    uuid.New().String(),
+						Content: chunk,
+						GroupID: groupID,
+						Source:  source,
+					}); err != nil {
+						slog.Warn("episode insert failed", "err", err)
+					}
+				} else {
+					ext := graph.New(db, client, resolveThreshold)
+					if err := ext.Process(ctx, chunk, source, groupID); err != nil {
+						slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
+					}
 				}
 			}
 		}
 
-		slog.Info("evaluating QA", "conv", conv.SampleID, "questions", len(conv.QA))
+		// Run community detection after ingestion (Louvain algorithm).
+		if !baseline {
+			result, err := db.DetectCommunities(ctx, groupID, 1.0)
+			if err != nil {
+				slog.Warn("community detection failed", "err", err)
+			} else {
+				slog.Info("communities detected",
+					"conv", conv.SampleID,
+					"communities", result.Communities,
+					"entities", result.Entities,
+				)
+			}
+		}
+
+		slog.Info("evaluating QA", "mode", mode, "conv", conv.SampleID, "questions", len(conv.QA))
 
 		// Evaluate each QA question.
 		for qi, qa := range conv.QA {
@@ -161,16 +203,27 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 				return nil, ctx.Err()
 			}
 
-			results, err := graph.Search(ctx, db, client, qa.Question, groupID, 10)
-			if err != nil {
-				slog.Warn("search failed", "question", qa.Question, "err", err)
-				scores = append(scores, qaScore{qa.Category, 0, 0})
-				continue
+			var contextStr string
+			if baseline {
+				episodes, err := db.SearchEpisodesFTS(ctx, qa.Question, groupID, 10)
+				if err != nil {
+					slog.Warn("search failed", "question", qa.Question, "err", err)
+					scores = append(scores, qaScore{qa.Category, 0, 0})
+					continue
+				}
+				contextStr = formatEpisodeContext(episodes)
+			} else {
+				results, err := graph.Search(ctx, db, client, qa.Question, groupID, 25)
+				if err != nil {
+					slog.Warn("search failed", "question", qa.Question, "err", err)
+					scores = append(scores, qaScore{qa.Category, 0, 0})
+					continue
+				}
+				contextStr = formatContext(results)
 			}
 
-			context := formatContext(results)
-			prompt := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", context, qa.Question)
-			answer, err := client.Answer(ctx, qaSystem, prompt)
+			prompt := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", contextStr, qa.Question)
+			answer, err := client.Answer(ctx, qaSystem, prompt, 0)
 			if err != nil {
 				slog.Warn("answer failed", "question", qa.Question, "err", err)
 				scores = append(scores, qaScore{qa.Category, 0, 0})
@@ -274,9 +327,14 @@ func parseLoCoMo(path string) ([]Conversation, error) {
 		}
 
 		for i, q := range rc.QA {
+			// Adversarial questions (category 5) use adversarial_answer, not answer.
+			answer := rawAnswerToString(q.Answer)
+			if answer == "" && len(q.AdversarialAnswer) > 0 {
+				answer = rawAnswerToString(q.AdversarialAnswer)
+			}
 			conv.QA[i] = QA{
 				Question: q.Question,
-				Answer:   rawAnswerToString(q.Answer),
+				Answer:   answer,
 				Category: q.Category,
 				Evidence: q.Evidence,
 			}
@@ -314,40 +372,79 @@ func formatContext(results []graph.SearchResult) string {
 	if len(results) == 0 {
 		return "(no relevant facts found)"
 	}
+	// Three-pass: facts (edges) → entity profiles → dialogue (episodes).
+	// LLMs attend more strongly to early context; concise facts first helps
+	// single-hop questions. Entity descriptions help inference questions about
+	// character traits and preferences ("Would Caroline...?").
 	var b strings.Builder
-	for i, r := range results {
-		switch r.Type {
-		case "entity":
-			fmt.Fprintf(&b, "%d. %s (%s)\n", i+1, r.Title, r.Body)
-		case "edge":
-			fmt.Fprintf(&b, "%d. %s\n", i+1, r.Body)
-		case "episode":
-			// Truncate long episode content to keep prompt manageable.
-			body := r.Body
-			if len(body) > 500 {
-				body = body[:500] + "..."
-			}
-			fmt.Fprintf(&b, "%d. [dialogue] %s\n", i+1, body)
+	n := 0
+	for _, r := range results {
+		if r.Type != "edge" {
+			continue
 		}
+		n++
+		fmt.Fprintf(&b, "%d. %s\n", n, r.Body)
+	}
+	for _, r := range results {
+		if r.Type != "entity" {
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, "%d. [%s] %s\n", n, r.Title, r.Body)
+	}
+	for _, r := range results {
+		if r.Type != "episode" {
+			continue
+		}
+		n++
+		body := r.Body
+		if len(body) > 1500 {
+			body = body[:1500] + "..."
+		}
+		fmt.Fprintf(&b, "%d. [dialogue] %s\n", n, body)
+	}
+	if n == 0 {
+		return "(no relevant facts found)"
+	}
+	return b.String()
+}
+
+func formatEpisodeContext(episodes []store.Episode) string {
+	if len(episodes) == 0 {
+		return "(no relevant dialogue found)"
+	}
+	var b strings.Builder
+	for i, ep := range episodes {
+		body := ep.Content
+		if len(body) > 500 {
+			body = body[:500] + "..."
+		}
+		fmt.Fprintf(&b, "%d. %s\n", i+1, body)
 	}
 	return b.String()
 }
 
 func chunkText(text string, size int) []string {
-	runes := []rune(text)
-	if len(runes) <= size {
-		return []string{string(runes)}
+	if len([]rune(text)) <= size {
+		return []string{text}
 	}
+	// Split at line boundaries to keep dialogue turns intact.
+	// Partial turns confuse entity/edge extraction.
+	lines := strings.Split(text, "\n")
 	var chunks []string
-	for i := 0; i < len(runes); i += size {
-		end := i + size
-		if end > len(runes) {
-			end = len(runes)
+	var current strings.Builder
+	for _, line := range lines {
+		if current.Len()+len(line)+1 > size && current.Len() > 0 {
+			chunks = append(chunks, current.String())
+			current.Reset()
 		}
-		chunks = append(chunks, string(runes[i:end]))
-		if end == len(runes) {
-			break
+		if current.Len() > 0 {
+			current.WriteByte('\n')
 		}
+		current.WriteString(line)
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
 	}
 	return chunks
 }

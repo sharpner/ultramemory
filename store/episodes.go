@@ -105,6 +105,33 @@ func (d *DB) SearchEpisodesFTS(ctx context.Context, query, groupID string, limit
 	return out, rows.Err()
 }
 
+// AllEpisodesWithEmbeddings loads all episodes with embeddings for vector search.
+func (d *DB) AllEpisodesWithEmbeddings(ctx context.Context, groupID string) ([]Episode, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT uuid, content, source, embedding
+		 FROM episodes
+		 WHERE group_id = ? AND embedding IS NOT NULL`,
+		groupID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Episode
+	for rows.Next() {
+		var ep Episode
+		var blob []byte
+		if err := rows.Scan(&ep.UUID, &ep.Content, &ep.Source, &blob); err != nil {
+			return nil, err
+		}
+		ep.GroupID = groupID
+		ep.Embedding = DecodeEmbedding(blob)
+		out = append(out, ep)
+	}
+	return out, rows.Err()
+}
+
 // CountEpisodes returns the total episode count for a group.
 func (d *DB) CountEpisodes(ctx context.Context, groupID string) (int, error) {
 	var n int
