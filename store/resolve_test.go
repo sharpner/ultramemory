@@ -181,6 +181,33 @@ func TestResolveEntities_SelfLoopCleanup(t *testing.T) {
 	}
 }
 
+// TestResolveEntities_NoFalsePositive verifies that semantically related but
+// distinct entities (e.g., two different musicians) are never merged even when
+// their embeddings are similar, because their names share no tokens.
+func TestResolveEntities_NoFalsePositive(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	grp := "grp"
+
+	// Both have nearly identical embeddings (same type → entity embeddings cluster),
+	// but their names share no tokens → must NOT merge.
+	sameVec := []float32{1, 0, 0, 0}
+	insertEntityWithEmbedding(t, db, "e1", "Mozart", "person", grp, sameVec)
+	insertEntityWithEmbedding(t, db, "e2", "Bach", "person", grp, sameVec)
+
+	result, err := db.ResolveEntities(ctx, grp, ResolveConfig{Threshold: 0.85})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.ClustersFound != 0 {
+		t.Errorf("semantically similar but distinct entities must not be clustered, got %d", result.ClustersFound)
+	}
+	if got := countEntitiesRaw(t, db, grp); got != 2 {
+		t.Errorf("expected both entities to remain, got %d", got)
+	}
+}
+
 // TestResolveEntities_NoEmbeddingSkipped verifies that entities without
 // embeddings are never merged regardless of name similarity.
 func TestResolveEntities_NoEmbeddingSkipped(t *testing.T) {
