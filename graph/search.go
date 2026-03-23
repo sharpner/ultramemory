@@ -222,28 +222,23 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].score > entries[j].score })
 
+	// Entities are tracked for MAGMA seeding and lookup only — they are never
+	// rendered in formatContext (three-pass: community → edges → episodes).
+	// We must NOT count them against the limit, or they steal slots from
+	// edges and episodes that are the actual answer sources.
 	var results []SearchResult
+	contentCount := 0 // only edges + episodes count against limit
 	for _, en := range entries {
-		if len(results) >= limit {
+		if contentCount >= limit {
 			break
 		}
 		key := en.key
 		switch {
 		case len(key) > 4 && key[:4] == "ent:":
-			uid := key[4:]
-			if e, ok := entByUUID[uid]; ok {
-				body := e.EntityType
-				if e.Description != "" {
-					body = e.EntityType + ": " + e.Description
-				}
-				results = append(results, SearchResult{
-					Type:  "entity",
-					UUID:  uid,
-					Title: e.Name,
-					Body:  body,
-					Score: en.score,
-				})
-			}
+			// Skip: entities have no output in formatContext.
+			// Their RRF contribution already shaped contentful result ordering
+			// via MAGMA seeds and community boost in prior signals.
+			_ = key
 		case len(key) > 4 && key[:4] == "edg:":
 			uid := key[4:]
 			if e, ok := edgByUUID[uid]; ok {
@@ -259,6 +254,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 					Score:   en.score,
 					ValidAt: validAt,
 				})
+				contentCount++
 			}
 		case len(key) > 3 && key[:3] == "ep:":
 			uid := key[3:]
@@ -271,6 +267,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 					Score:  en.score,
 					Source: e.Source,
 				})
+				contentCount++
 			}
 		}
 	}
@@ -299,11 +296,9 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 
 	// ── 6. Populate source for each result ────────────────────────────────────
+	// Entities are not in results (skipped above), so only edges need source lookup.
 	for i, r := range results {
-		switch r.Type {
-		case "entity":
-			results[i].Source = db.FirstEntitySource(ctx, r.UUID, groupID)
-		case "edge":
+		if r.Type == "edge" {
 			results[i].Source = db.FirstEdgeSource(ctx, r.UUID)
 		}
 	}
