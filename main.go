@@ -20,6 +20,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,11 +47,19 @@ func main() {
 	}
 
 	// Config from env (overridable).
-	dbPath        := envOr("MEMORY_DB", defaultDB)
-	ollamaURL     := envOr("MEMORY_OLLAMA", defaultOllama)
-	extractModel  := envOr("MEMORY_MODEL", defaultExtractModel)
-	embedModel    := envOr("MEMORY_EMBED_MODEL", defaultEmbeddingModel)
-	groupID       := envOr("MEMORY_GROUP", defaultGroup)
+	dbPath           := envOr("MEMORY_DB", defaultDB)
+	ollamaURL        := envOr("MEMORY_OLLAMA", defaultOllama)
+	extractModel     := envOr("MEMORY_MODEL", defaultExtractModel)
+	embedModel       := envOr("MEMORY_EMBED_MODEL", defaultEmbeddingModel)
+	groupID          := envOr("MEMORY_GROUP", defaultGroup)
+	resolveThreshold := 0.92
+	if v := os.Getenv("MEMORY_RESOLVE_THRESHOLD"); v != "" {
+		t, err := strconv.ParseFloat(v, 64)
+		if err != nil || t <= 0 || t > 1 {
+			fatalf("MEMORY_RESOLVE_THRESHOLD must be a float in (0, 1], got %q", v)
+		}
+		resolveThreshold = t
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -80,7 +90,7 @@ func main() {
 		if err := client.Warmup(ctx); err != nil {
 			slog.Warn("warmup failed", "err", err)
 		}
-		runWorker(ctx, db, client)
+		runWorker(ctx, db, client, resolveThreshold)
 
 	case "run":
 		if len(os.Args) < 3 {
@@ -96,19 +106,21 @@ func main() {
 		n, err := ingest.New(db, groupID).Walk(ctx, os.Args[2])
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
-		runWorker(ctx, db, client)
+		runWorker(ctx, db, client, resolveThreshold)
 
 	case "search":
 		fs := flag.NewFlagSet("search", flag.ExitOnError)
-		format := fs.String("format", "text", "output format: text|json")
+		format    := fs.String("format",     "text", "output format: text|json")
+		maxTokens := fs.Int("max-tokens",    0,      "token budget for output (0 = unlimited)")
 		fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
-			fatalf("usage: ultramemory search [-format text|json] <query>")
+			fatalf("usage: ultramemory search [-format text|json] [-max-tokens N] <query>")
 		}
 		must(client.Ping(ctx), "ping ollama")
-		results, err := graph.Search(ctx, db, client, fs.Arg(0), groupID, 10)
+		query := strings.Join(fs.Args(), " ")
+		results, err := graph.Search(ctx, db, client, query, groupID, 10)
 		must(err, "search")
-		printSearch(results, fs.Arg(0), *format)
+		printSearch(results, query, *format, *maxTokens)
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
@@ -123,8 +135,8 @@ func main() {
 }
 
 // runWorker polls the SQLite queue and processes jobs with max 1 concurrent LLM call.
-func runWorker(ctx context.Context, db *store.DB, client *llm.Client) {
-	ext := graph.New(db, client)
+func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThreshold float64) {
+	ext := graph.New(db, client, resolveThreshold)
 	concurrency := runtime.NumCPU()
 	if concurrency > 4 {
 		concurrency = 4
@@ -200,11 +212,22 @@ type searchHit struct {
 	Score float64 `json:"score"`
 }
 
-func printSearch(results []graph.SearchResult, query, format string) {
+// approxTokens estimates token count using the standard 1 token ≈ 4 chars heuristic.
+func approxTokens(s string) int {
+	return (len(s) + 3) / 4
+}
+
+func printSearch(results []graph.SearchResult, query, format string, maxTokens int) {
 	if format == "json" {
 		enc := json.NewEncoder(os.Stdout)
+		used := 0
 		for i, r := range results {
+			cost := approxTokens(r.Title + r.Body)
+			if maxTokens > 0 && used+cost > maxTokens {
+				break
+			}
 			enc.Encode(searchHit{i + 1, r.Type, r.Title, r.Body, r.Score})
+			used += cost
 		}
 		return
 	}
@@ -213,9 +236,17 @@ func printSearch(results []graph.SearchResult, query, format string) {
 		return
 	}
 	fmt.Printf("Results for %q:\n\n", query)
+	used := 0
 	for i, r := range results {
+		cost := approxTokens(r.Title + r.Body)
+		if maxTokens > 0 && used+cost > maxTokens {
+			fmt.Printf("-- token budget reached (%d/%d tokens used, %d result(s) omitted) --\n",
+				used, maxTokens, len(results)-i)
+			break
+		}
 		fmt.Printf("%d. [%s] %s\n   %s\n   score=%.4f\n\n",
 			i+1, r.Type, r.Title, r.Body, r.Score)
+		used += cost
 	}
 }
 
@@ -266,7 +297,7 @@ Commands:
   run    <path>   ingest directory + start worker (all-in-one)
   ingest <path>   queue all text files for processing
   worker          process queued jobs (blocking)
-  search <query>  hybrid search over the graph
+  search <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
   status          show queue and graph statistics
 
 Environment:

@@ -98,11 +98,17 @@ CREATE INDEX IF NOT EXISTS idx_jobs_pending
 CREATE INDEX IF NOT EXISTS idx_entities_group
 	ON entities(group_id, name);
 
-CREATE INDEX IF NOT EXISTS idx_edges_src
-	ON edges(source_uuid);
+-- Composite indexes for GetNeighbors (MAGMA traversal hot path).
+-- Filters always combine source_uuid/target_uuid with group_id;
+-- composite indexes let SQLite seek directly without a post-filter scan.
+CREATE INDEX IF NOT EXISTS idx_edges_src_grp
+	ON edges(source_uuid, group_id);
 
-CREATE INDEX IF NOT EXISTS idx_edges_tgt
-	ON edges(target_uuid);
+CREATE INDEX IF NOT EXISTS idx_edges_tgt_grp
+	ON edges(target_uuid, group_id);
+
+CREATE INDEX IF NOT EXISTS idx_edges_group
+	ON edges(group_id);
 `
 
 // DB wraps a SQLite database connection.
