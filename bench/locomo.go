@@ -217,6 +217,23 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 						slog.Warn("community report generation failed", "err", err)
 					}
 				}
+
+				// Entity resolution: merge near-duplicates (Graphiti §4.1).
+				// After community detection so canonical inherits correct community_id.
+				if resolveThreshold > 0 {
+					rr, err := db.ResolveEntities(ctx, groupID, store.ResolveConfig{
+						Threshold: resolveThreshold,
+					})
+					if err != nil {
+						slog.Warn("entity resolution failed", "err", err)
+					} else if rr.ClustersFound > 0 {
+						slog.Info("entity resolution complete",
+							"clusters", rr.ClustersFound,
+							"merged", rr.EntitiesMerged,
+							"edges_retargeted", rr.EdgesRetargeted,
+						)
+					}
+				}
 			}
 		}
 

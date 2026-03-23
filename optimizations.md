@@ -471,4 +471,41 @@ Edge vector search bei Threshold 0.5 half adversarial minimal (+1%), kostete abe
 **Adversarial-Gap zu v11 (52.7%) bleibt ungeklärt** — kein der getesteten Hypothesen erklärt den vollen -9% Gap.
 Mögliche Ursachen: v11 DB war frisch ingested (andere Extraktionsqualität), oder stochastische Varianz bei 47 Fragen.
 
+### Iteration 24/25 — v24/v25 Prompt-Optimierungsversuche (2026-03-23)
+v24: Diagnose-Run — Session-Tags als führendes Label verursachen Format-Pollution (Modell kopiert "[session_4] Caroline works..." verbatim). Temporal-Fragen brauchen Datums-Inferenz aus Relativausdrücken.
+v25 (full): Neue Prompt-Regeln (1-10 Wörter, exact words, most recent session, no session tags) → **-4.4% overall** durch "most recent session" Regel die multi-hop zerstört (-10.0%).
+v25b (minimal): Nur Datums-Inferenz-Instruktion → **44.4% F1** (vs v23's 44.7%) — neutral/leicht schlechter.
+
+**Erkenntnis**: gemma3:4b folgt komplexen Prompt-Regeln unzuverlässig. Einfacher Prompt bleibt besser.
+
+### Iteration 26 — v26: SYNAPSE §3.2 + Leiden §4 Community Reports (2026-03-23)
+Code:
+- SYNAPSE §3.2 Temporal Decay: Post-RRF Re-Ranking, λ=0.3, neuere Sessions ×höher gewichtet
+- Leiden §4 Community Reports: LLM-generierte 1-Satz-Zusammenfassungen per Community (≥3 Mitglieder), als [background] im Kontext
+- Three-pass context: community reports → edge facts → episodes
+
+**v26 qa-only (v18.db, kein community reports):**
+
+| Category | F1 | EM | Delta vs v23 |
+|----------|-----|-----|-------------|
+| single-hop | 34.8% | 6.2% | -1.8% |
+| multi-hop | 43.3% | 5.4% | +1.1% |
+| temporal | 7.2% | 0.0% | -4.1% |
+| open-domain | 57.1% | 21.4% | +0.4% |
+| adversarial | 42.6% | 17.0% | -1.1% |
+| **OVERALL** | **44.3%** | **13.6%** | **-0.4%** |
+
+Duration: 17m23s. **Temporal Decay allein: neutral/-0.4% auf v18.db** (keine Community Reports vorhanden).
+Frische Ingestion (v26-fresh.db) mit Community Reports läuft parallel → messung von vollem v26-Effekt ausstehend.
+
+### Iteration 27 — v27: Entity Resolution in Pipeline (Graphiti §4.1) (2026-03-23)
+Code:
+- Entity Resolution nach Community Detection in bench/locomo.go eingefügt
+- Merger von Duplikaten via embedding cosine (threshold 0.92) + token Jaccard
+- Union-Find Clustering, Canonical = Entity mit meisten Kanten
+
+**Erwartung**: Saubererer Graph → bessere MAGMA-Traversal für multi-hop Fragen.
+Frische Ingestion auf /tmp/v27-fresh.db ausstehend.
+
+
 
