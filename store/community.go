@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
@@ -192,4 +193,114 @@ func (d *DB) EntitiesInCommunity(ctx context.Context, groupID string, communityI
 		uuids = append(uuids, uuid)
 	}
 	return uuids, rows.Err()
+}
+
+// CommunityInput holds the data needed to generate a community report.
+type CommunityInput struct {
+	CommunityID int
+	EntityNames []string // names of entities in the community
+	KeyFacts    []string // top edge facts connecting community members
+}
+
+// CommunityInputsForGroup returns CommunityInput for all communities in a group
+// that have at least minMembers entities. Used by the report generation step.
+func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMembers int) ([]CommunityInput, error) {
+	// Load community → entity names
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT community_id, name FROM entities WHERE group_id = ? AND community_id >= 0 ORDER BY community_id`,
+		groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	communityNames := map[int][]string{}
+	for rows.Next() {
+		var cid int
+		var name string
+		if err := rows.Scan(&cid, &name); err != nil {
+			return nil, err
+		}
+		communityNames[cid] = append(communityNames[cid], name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var inputs []CommunityInput
+	for cid, names := range communityNames {
+		if len(names) < minMembers {
+			continue
+		}
+		// Load top 5 edge facts involving community members.
+		// Use a subquery to get entity UUIDs for this community.
+		factRows, err := d.sql.QueryContext(ctx, `
+			SELECT fact FROM edges
+			WHERE group_id = ? AND (
+				source_uuid IN (SELECT uuid FROM entities WHERE group_id = ? AND community_id = ?)
+				OR target_uuid IN (SELECT uuid FROM entities WHERE group_id = ? AND community_id = ?)
+			)
+			LIMIT 5`,
+			groupID, groupID, cid, groupID, cid)
+		if err != nil {
+			return nil, err
+		}
+		var facts []string
+		for factRows.Next() {
+			var f string
+			if err := factRows.Scan(&f); err != nil {
+				factRows.Close()
+				return nil, err
+			}
+			facts = append(facts, f)
+		}
+		factRows.Close()
+		if err := factRows.Err(); err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, CommunityInput{
+			CommunityID: cid,
+			EntityNames: names,
+			KeyFacts:    facts,
+		})
+	}
+	return inputs, nil
+}
+
+// StoreCommunityReport persists a generated report for a community.
+func (d *DB) StoreCommunityReport(ctx context.Context, groupID string, communityID int, report string) error {
+	_, err := d.sql.ExecContext(ctx,
+		`INSERT OR REPLACE INTO community_reports (community_id, group_id, report) VALUES (?, ?, ?)`,
+		communityID, groupID, report)
+	return err
+}
+
+// CommunityReportsForIDs returns stored reports for the given community IDs.
+func (d *DB) CommunityReportsForIDs(ctx context.Context, groupID string, communityIDs []int) ([]string, error) {
+	if len(communityIDs) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(communityIDs)+1)
+	args = append(args, groupID)
+	placeholders := make([]string, len(communityIDs))
+	for i, cid := range communityIDs {
+		placeholders[i] = "?"
+		args = append(args, cid)
+	}
+	query := `SELECT report FROM community_reports WHERE group_id = ? AND community_id IN (` +
+		strings.Join(placeholders, ",") + `) AND report != ''`
+	rows, err := d.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var reports []string
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			return nil, err
+		}
+		reports = append(reports, r)
+	}
+	return reports, rows.Err()
 }

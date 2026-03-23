@@ -201,7 +201,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 				}
 			}
 
-			// Run community detection after ingestion (Louvain algorithm).
+			// Run community detection + report generation after ingestion (Leiden §4).
 			if !baseline {
 				result, err := db.DetectCommunities(ctx, groupID, 1.0)
 				if err != nil {
@@ -212,6 +212,10 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 						"communities", result.Communities,
 						"entities", result.Entities,
 					)
+					// Generate LLM community reports (≥3 members only).
+					if err := graph.GenerateCommunityReports(ctx, db, client, groupID); err != nil {
+						slog.Warn("community report generation failed", "err", err)
+					}
 				}
 			}
 		}
@@ -431,13 +435,22 @@ func formatContext(results []graph.SearchResult) string {
 	if len(results) == 0 {
 		return "(no relevant facts found)"
 	}
-	// Two-pass: facts (edges) first for primacy bias, then dialogue (episodes).
-	// Entity profiles skipped — they cause entity-attribution confusion in adversarial
-	// questions ("What was grandpa's gift?" when grandma gave it). Entity descriptions
-	// in facts (edges) already capture who-did-what relationships without the noise.
-	// Session tags on edge facts provide temporal grounding for the LLM.
+	// Three-pass: community reports first (global context), then facts (edges),
+	// then dialogue (episodes). Entity profiles skipped — they cause entity-attribution
+	// confusion. Session tags on edge facts provide temporal grounding.
 	var b strings.Builder
 	n := 0
+
+	// Pass 1: community reports (Leiden §4 global context).
+	for _, r := range results {
+		if r.Type != "community" {
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, "%d. [background] %s\n", n, r.Body)
+	}
+
+	// Pass 2: edge facts.
 	for _, r := range results {
 		if r.Type != "edge" {
 			continue
@@ -445,6 +458,8 @@ func formatContext(results []graph.SearchResult) string {
 		n++
 		fmt.Fprintf(&b, "%d. %s%s\n", n, temporalTag(r.ValidAt, r.Source), r.Body)
 	}
+
+	// Pass 3: episode dialogue.
 	for _, r := range results {
 		if r.Type != "episode" {
 			continue

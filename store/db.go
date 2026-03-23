@@ -114,6 +114,13 @@ CREATE INDEX IF NOT EXISTS idx_edges_group
 
 CREATE INDEX IF NOT EXISTS idx_entities_community
 	ON entities(group_id, community_id);
+
+CREATE TABLE IF NOT EXISTS community_reports (
+	community_id INTEGER NOT NULL,
+	group_id     TEXT NOT NULL,
+	report       TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (community_id, group_id)
+);
 `
 
 // migrations runs after schema init to add columns to existing databases.

@@ -3,7 +3,10 @@ package graph
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/sharpner/ultramemory/llm"
 	"github.com/sharpner/ultramemory/store"
@@ -282,7 +285,84 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		}
 	}
 
+	// ── 7. SYNAPSE §3.2 Temporal Decay ────────────────────────────────────────
+	// Weight results by recency: facts from recent sessions score higher.
+	// Normalised: session_N gets weight 1.0, session_1 gets exp(-λ × (N-1)/N).
+	// λ=0.3 is mild — session_1 ≈ 0.75× vs session_N; avoids over-penalising
+	// historical facts needed for multi-hop / temporal questions.
+	// Only applied when at least 2 distinct sessions appear in the result set.
+	{
+		maxSess := 0
+		for _, r := range results {
+			if s := sessionFromSource(r.Source); s > maxSess {
+				maxSess = s
+			}
+		}
+		if maxSess > 1 {
+			const lambdaT = 0.3
+			for i, r := range results {
+				s := sessionFromSource(r.Source)
+				if s > 0 {
+					age := float64(maxSess-s) / float64(maxSess)
+					results[i].Score *= math.Exp(-lambdaT * age)
+				}
+			}
+			sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+		}
+	}
+
+	// ── 8. Leiden §4 Community Reports ────────────────────────────────────────
+	// Prepend LLM-generated community summaries for seed-entity communities.
+	// Provides global context that helps multi-hop and open-domain questions.
+	// Reports are generated at ingestion time and fetched here (no LLM at query time).
+	if len(seeds) > 0 {
+		communityMap, _ := db.CommunityMap(ctx, groupID)
+		seedCommunityIDs := map[int]bool{}
+		for _, s := range seeds {
+			if cid, ok := communityMap[s.UUID]; ok && cid >= 0 {
+				seedCommunityIDs[cid] = true
+			}
+		}
+		if len(seedCommunityIDs) > 0 {
+			cids := make([]int, 0, len(seedCommunityIDs))
+			for cid := range seedCommunityIDs {
+				cids = append(cids, cid)
+			}
+			reports, _ := db.CommunityReportsForIDs(ctx, groupID, cids)
+			// Prepend community reports as high-score context items.
+			// Score just above top result to ensure they appear first.
+			topScore := 0.0
+			if len(results) > 0 {
+				topScore = results[0].Score
+			}
+			for i, report := range reports {
+				results = append([]SearchResult{{
+					Type:  "community",
+					UUID:  "",
+					Title: "community context",
+					Body:  report,
+					Score: topScore + float64(len(reports)-i)*0.01,
+				}}, results...)
+			}
+		}
+	}
+
 	return results, nil
+}
+
+// sessionFromSource extracts the session number from a source path.
+// "locomo/conv-26/session_7" → 7. Returns 0 if not a session source.
+func sessionFromSource(source string) int {
+	idx := strings.LastIndex(source, "session_")
+	if idx < 0 {
+		return 0
+	}
+	numStr := source[idx+8:]
+	if slash := strings.IndexByte(numStr, '/'); slash >= 0 {
+		numStr = numStr[:slash]
+	}
+	n, _ := strconv.Atoi(numStr)
+	return n
 }
 
 // ftsEntitySeeds extracts the top-n FTS entity hits as MAGMA seed nodes.
