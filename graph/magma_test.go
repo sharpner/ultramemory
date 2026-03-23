@@ -274,8 +274,8 @@ func TestSpreadMAGMA_NoCycles(t *testing.T) {
 
 func TestDefaultMAGMAConfig(t *testing.T) {
 	cfg := DefaultMAGMAConfig()
-	if cfg.BeamWidth != 20 {
-		t.Errorf("BeamWidth: want 20 (tuned: wider beam improves multi-hop recall), got %d", cfg.BeamWidth)
+	if cfg.BeamWidth != 10 {
+		t.Errorf("BeamWidth: want 10 (paper default; v18 showed BeamWidth=20 costs -11%% adversarial for +4%% multi-hop, net negative), got %d", cfg.BeamWidth)
 	}
 	if cfg.MaxHops != 5 {
 		t.Errorf("MaxHops: want 5, got %d", cfg.MaxHops)

@@ -411,6 +411,20 @@ func formatSession(s Session) string {
 	return b.String()
 }
 
+// sessionTag extracts a readable session label from a source path.
+// "locomo/conv-26/session_7" → "[session_7]", "" otherwise.
+func sessionTag(source string) string {
+	if source == "" {
+		return ""
+	}
+	parts := strings.Split(source, "/")
+	last := parts[len(parts)-1]
+	if strings.HasPrefix(last, "session_") {
+		return "[" + last + "] "
+	}
+	return ""
+}
+
 func formatContext(results []graph.SearchResult) string {
 	if len(results) == 0 {
 		return "(no relevant facts found)"
@@ -419,6 +433,7 @@ func formatContext(results []graph.SearchResult) string {
 	// Entity profiles skipped — they cause entity-attribution confusion in adversarial
 	// questions ("What was grandpa's gift?" when grandma gave it). Entity descriptions
 	// in facts (edges) already capture who-did-what relationships without the noise.
+	// Session tags on edge facts provide temporal grounding for the LLM.
 	var b strings.Builder
 	n := 0
 	for _, r := range results {
@@ -426,7 +441,7 @@ func formatContext(results []graph.SearchResult) string {
 			continue
 		}
 		n++
-		fmt.Fprintf(&b, "%d. %s\n", n, r.Body)
+		fmt.Fprintf(&b, "%d. %s%s\n", n, sessionTag(r.Source), r.Body)
 	}
 	for _, r := range results {
 		if r.Type != "episode" {
