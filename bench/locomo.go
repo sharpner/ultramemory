@@ -412,17 +412,10 @@ func formatSession(s Session) string {
 }
 
 // temporalTag produces a readable time label for an edge fact in context.
-// Prefers validAt ISO date ("2023-05-08T00:00:00Z" → "[8 May 2023]") for precise
-// temporal grounding. Falls back to session tag from source path.
-func temporalTag(validAt, source string) string {
-	if validAt != "" {
-		t, err := time.Parse(time.RFC3339, validAt)
-		if err == nil {
-			return "[" + t.Format("2 Jan 2006") + "] "
-		}
-		// Non-RFC3339 but non-empty — use as-is trimmed.
-		return "[" + strings.TrimSpace(validAt) + "] "
-	}
+// Uses session tag from source path — all edges have a session, only ~50% have validAt.
+// Inconsistent date coverage (some edges dated, some not) confuses multi-hop reasoning.
+// ValidAt dates stored in SearchResult.ValidAt for future use (e.g. temporal filtering).
+func temporalTag(_, source string) string {
 	if source == "" {
 		return ""
 	}
