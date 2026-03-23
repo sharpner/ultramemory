@@ -150,7 +150,7 @@ func (d *DB) EpisodesForEntities(ctx context.Context, entityUUIDs []string, grou
 		FROM episodes e
 		JOIN entity_episodes ee ON ee.episode_uuid = e.uuid
 		WHERE ee.entity_uuid IN (`+ph+`) AND e.group_id = ?
-		ORDER BY e.source DESC
+		ORDER BY e.created_at DESC
 		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
