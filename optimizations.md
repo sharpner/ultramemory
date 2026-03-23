@@ -339,8 +339,69 @@ entities more often. gemma3:4b's directness actually works in its favor here.
 would require LLM-as-judge scoring to show improvement. See Issue #23 for why LLM-judge is also
 problematic (61.84% score for deliberate hallucinations).
 
-### Next steps
-- Adversarial regression vs v11: entity profiles cause entity confusion (grandma A vs grandma B)
-  → Consider filtering entity profiles or adding source attribution
-- Temporal decay (SYNAPSE §3.2): weight edges by session recency
-- Consider reverting entity profiles entirely to recover adversarial
+### Iteration 18 — v18: Entity Profiles entfernt (Two-Pass: edges + episodes) + Mistral-Judge (2026-03-23)
+Hypothese: Entity profiles verursachen adversarial-Regression. Two-Pass (ohne Profile) sollte adversarial richtung v11 (52.7%) zurückbringen.
+
+| Category | F1 | EM | Judge% | vs v16 |
+|----------|-----|-----|--------|--------|
+| single-hop | 30.2% | 3.1% | 46.9% | -5.9% |
+| multi-hop | 38.6% | 5.4% | 32.4% | +6.0% |
+| temporal | 8.1% | 0.0% | 38.5% | -4.4% |
+| open-domain | 55.5% | 21.4% | **80.0%** | -2.0% |
+| adversarial | 41.6% | 17.0% | 53.2% | -0.7% |
+| **OVERALL** | **41.9%** | **13.1%** | **56.8%** | -1.0% |
+
+Duration: 7m50s
+
+**Überraschendes Ergebnis**: Adversarial hat sich NICHT erholt — Entity Profiles waren NICHT die Ursache!
+**Echte Ursache**: BeamWidth=20 (v16) kostet -11% adversarial für +4.4% multi-hop.
+- Mehr Exploration → mehr Noise → LLM halluziniert statt "unknown" zu sagen
+- Net auf 199 Fragen: 47×(-11%) + 37×(+4.4%) = -3.5 Fragen → BeamWidth zurück auf 10
+
+**Mistral-Judge Erkenntnisse:**
+- Open-domain: 80.0% Judge vs 55.5% tokenF1 → Retrieval sehr gut, LLM formuliert anders als Gold
+- Temporal: 38.5% Judge vs 8.1% tokenF1 → Datumsformat-Unterschiede ("7 May 2023" vs "May 7")
+- Multi-hop: 32.4% Judge < 38.6% tokenF1 → Zufallstreffer bei Wortüberlapp, semantisch ungenau
+- Adversarial: 53.2% Judge vs 41.6% tokenF1 → 11% Antworten semantisch korrekt aber anders formuliert
+- **Gesamt: 56.8% Judge vs 41.9% tokenF1** → System ist semantisch deutlich besser als F1 suggeriert
+
+**Judge-Inflations-Warnung**: Issue #23 zeigt Halluzinationen erzielen 61.84% mit LLM-Judge.
+Unsere 56.8% Judge ist daher kein Beweis für gute Qualität — tokenF1 (41.9%) bleibt der ehrlichere Maßstab.
+
+### Iteration 19 — v19: BeamWidth=10 + Session-Tags (2026-03-23)
+Code:
+- graph/magma.go: BeamWidth 20→10 (paper default)
+- bench/locomo.go: Session-Tags in edge-Kontext "[session_7] Alice received necklace"
+
+| Category | F1 | EM | Delta vs v18 | Delta vs v16 |
+|----------|-----|-----|-------------|-------------|
+| single-hop | 27.1% | 3.1% | -3.1% | -9.0% |
+| multi-hop | **42.0%** | 5.4% | **+3.4%** | **+9.4%** |
+| temporal | 11.6% | 0.0% | +3.5% | -0.9% |
+| open-domain | 55.2% | 20.0% | -0.3% | -2.3% |
+| adversarial | 43.4% | 21.3% | +1.8% | +1.1% |
+| **OVERALL** | **42.6%** | **13.6%** | **+0.7%** | **-0.3%** |
+
+Duration: 6m40s
+
+**Multi-hop 42.0% — neuer Rekord!** (+9.4% vs v16 mit BeamWidth=20)
+**Adversarial NICHT erholt**: 43.4% vs v11's 52.7%. Die Regression liegt NICHT an BeamWidth.
+
+**Hypothese für verbleibende Adversarial-Regression (-9.3% vs v11):**
+- v11 hatte: kein edge vector search, keine Louvain communities
+- v19 hat: edge vector search + Louvain community boost (0.15)
+- Community boost promoviert thematisch verwandte edges → mehr Rauschen für "unknown"-Fragen
+
+Single-hop -3.1%: bei 32 Fragen = 1 Frage Diff → statistisches Rauschen.
+
+### Iteration 20 — v20: ValidAt-Dates im Kontext (2026-03-23, running)
+Hypothese: LLM extrahiert bereits valid_at für ~50% der Kanten.
+Zeigen wir "8 May 2023" statt "[session_1]", gibt das LLM korrekte Datumsformate.
+Temporal-Judge v18 zeigte 38.5% semantisch korrekt bei 8.1% tokenF1 → Datumsformat-Mismatch.
+
+Code:
+- store/edges.go: valid_at in FTS + vector search Queries
+- graph/search.go: SearchResult.ValidAt Feld
+- bench/locomo.go: temporalTag() bevorzugt ISO-Date über Session-Tag
+
+Result: awaiting completion
