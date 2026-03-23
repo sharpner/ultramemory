@@ -33,12 +33,13 @@ const qaSystem = `You answer questions about a conversation between two people.
 
 Rules:
 1. Use ONLY the provided context. Never use outside knowledge.
-2. Be extremely concise — answer in as few words as possible.
-3. For dates, use the exact format from the context (e.g. "7 May 2023").
-4. For names, give the full name exactly as it appears.
-5. If the context does NOT contain enough information to answer, respond with exactly: unknown
-6. If the question asks about something not mentioned in the context at all, respond with exactly: unknown
-7. Do not guess or make assumptions.`
+2. Be concise. For factual questions, answer in as few words as possible.
+3. For "Would", "Likely", or hypothetical questions, answer with your assessment AND a brief reason from the context (e.g. "Likely yes, she enjoys outdoor activities").
+4. For dates, use the exact format from the context (e.g. "7 May 2023").
+5. For names, give the full name exactly as it appears.
+6. If the context does NOT contain enough information to answer, respond with exactly: unknown
+7. If the question asks about something not mentioned in the context at all, respond with exactly: unknown
+8. Do not guess or make assumptions — base all reasoning on the provided context.`
 
 const chunkSize = 1500
 
