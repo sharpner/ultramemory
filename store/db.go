@@ -122,9 +122,9 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// Single writer — prevents "database is locked" under concurrent workers.
-	conn.SetMaxOpenConns(1)
-	conn.SetMaxIdleConns(1)
+	// WAL + multiple conns: reads proceed while the worker inserts.
+	conn.SetMaxOpenConns(4)
+	conn.SetMaxIdleConns(2)
 
 	if _, err := conn.ExecContext(context.Background(), schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)

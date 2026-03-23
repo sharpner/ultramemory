@@ -16,6 +16,7 @@ type SearchResult struct {
 	Title  string  // entity name or edge relation_type
 	Body   string  // edge fact or entity type
 	Score  float64
+	Source string  // originating source file
 }
 
 // Search performs hybrid search (FTS5 + cosine similarity via RRF).
@@ -149,6 +150,16 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		expanded, err := SpreadMAGMA(ctx, db, seeds, query, qEmb, groupID, DefaultMAGMAConfig())
 		if err == nil {
 			results = mergeMAGMA(results, expanded, limit)
+		}
+	}
+
+	// ── 5. Populate source for each result ────────────────────────────────────
+	for i, r := range results {
+		switch r.Type {
+		case "entity":
+			results[i].Source = db.FirstEntitySource(ctx, r.UUID, groupID)
+		case "edge":
+			results[i].Source = db.FirstEdgeSource(ctx, r.UUID)
 		}
 	}
 

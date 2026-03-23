@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -80,7 +81,7 @@ func main() {
 			fatalf("usage: memory-local ingest <path>")
 		}
 		must(client.Ping(ctx), "ping ollama")
-		n, err := ingest.New(db, groupID).Walk(ctx, os.Args[2])
+		n, err := ingest.New(db, groupID).WithOCR(client).Walk(ctx, os.Args[2])
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks from %s\n", n, os.Args[2])
 
@@ -103,7 +104,7 @@ func main() {
 			slog.Warn("warmup failed", "err", err)
 		}
 
-		n, err := ingest.New(db, groupID).Walk(ctx, os.Args[2])
+		n, err := ingest.New(db, groupID).WithOCR(client).Walk(ctx, os.Args[2])
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
 		runWorker(ctx, db, client, resolveThreshold)
@@ -205,11 +206,12 @@ func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThr
 
 // searchHit is the JSON-serialisable presentation of one search result.
 type searchHit struct {
-	Rank  int     `json:"rank"`
-	Type  string  `json:"type"`
-	Title string  `json:"title"`
-	Body  string  `json:"body,omitempty"`
-	Score float64 `json:"score"`
+	Rank   int     `json:"rank"`
+	Type   string  `json:"type"`
+	Title  string  `json:"title"`
+	Body   string  `json:"body,omitempty"`
+	Score  float64 `json:"score"`
+	Source string  `json:"source,omitempty"`
 }
 
 // approxTokens estimates token count using the standard 1 token ≈ 4 chars heuristic.
@@ -226,7 +228,7 @@ func printSearch(results []graph.SearchResult, query, format string, maxTokens i
 			if maxTokens > 0 && used+cost > maxTokens {
 				break
 			}
-			enc.Encode(searchHit{i + 1, r.Type, r.Title, r.Body, r.Score})
+			enc.Encode(searchHit{i + 1, r.Type, r.Title, r.Body, r.Score, r.Source})
 			used += cost
 		}
 		return
@@ -244,8 +246,12 @@ func printSearch(results []graph.SearchResult, query, format string, maxTokens i
 				used, maxTokens, len(results)-i)
 			break
 		}
-		fmt.Printf("%d. [%s] %s\n   %s\n   score=%.4f\n\n",
-			i+1, r.Type, r.Title, r.Body, r.Score)
+		src := ""
+		if r.Source != "" {
+			src = "   source=" + filepath.Base(r.Source) + "\n"
+		}
+		fmt.Printf("%d. [%s] %s\n   %s\n   score=%.4f\n%s\n",
+			i+1, r.Type, r.Title, r.Body, r.Score, src)
 		used += cost
 	}
 }

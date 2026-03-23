@@ -12,6 +12,19 @@ ollama pull gemma3:4b
 ollama pull nomic-embed-text
 ```
 
+### Optional: PDF support
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| `pdftotext` (poppler) | Extract text from digital PDFs | `brew install poppler` |
+| `tesseract` | OCR for scanned PDFs (**recommended**) | `brew install tesseract` |
+
+Without these tools, PDFs are skipped. Without `tesseract`, scanned PDFs fall back to gemma3 vision OCR — this works but produces lower accuracy output and logs a warning:
+
+```
+⚠ using gemma3 OCR fallback — accuracy is lower than Tesseract; install tesseract for better results
+```
+
 ## Install
 
 ```bash
@@ -54,6 +67,7 @@ ultramemory status
 | `MEMORY_MODEL`     | `gemma3:4b`               | Entity/edge extraction model     |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text`      | Embedding model                  |
 | `MEMORY_GROUP`     | `default`                 | Namespace for graph isolation    |
+| `MEMORY_RESOLVE_THRESHOLD` | `0.92`          | Cosine similarity threshold for entity deduplication (0–1) |
 
 ## JSON API
 

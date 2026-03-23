@@ -9,29 +9,51 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/sharpner/ultramemory/graph"
+	"github.com/sharpner/ultramemory/llm"
 	"github.com/sharpner/ultramemory/store"
 )
 
 const (
-	// chunkSize is the max rune count per text chunk pushed to the queue.
-	chunkSize = 1500
-	// chunkOverlap is the overlap between consecutive chunks (context continuity).
+	chunkSize    = 1500
 	chunkOverlap = 150
 )
 
 // Walker ingests files into the job queue.
 type Walker struct {
-	db      *store.DB
-	groupID string
+	db           *store.DB
+	groupID      string
+	pdftotextBin string // optional: poppler pdftotext
+	pdftoppmBin  string // optional: poppler pdftoppm (needed for OCR fallback)
+	tesseractBin string // optional: Tesseract OCR
+	ocrClient    *llm.Client // optional: gemma3 OCR fallback
 }
 
-// New creates a Walker.
+// New creates a Walker, detecting available PDF tools on PATH.
 func New(db *store.DB, groupID string) *Walker {
-	return &Walker{db: db, groupID: groupID}
+	w := &Walker{db: db, groupID: groupID}
+	w.pdftotextBin, _ = exec.LookPath("pdftotext")
+	w.pdftoppmBin, _ = exec.LookPath("pdftoppm")
+	w.tesseractBin, _ = exec.LookPath("tesseract")
+
+	if w.pdftotextBin == "" {
+		slog.Warn("pdftotext not found — digital PDFs will be skipped (install poppler)")
+	}
+	if w.tesseractBin == "" {
+		slog.Warn("tesseract not found — scanned PDFs will fall back to gemma3 OCR (lower accuracy)")
+	}
+	return w
+}
+
+// WithOCR attaches a gemma3 client as last-resort OCR fallback for scanned PDFs.
+// Only used when both pdftotext and tesseract produce no output.
+func (w *Walker) WithOCR(client *llm.Client) *Walker {
+	w.ocrClient = client
+	return w
 }
 
 // Walk recursively ingests all readable text files under root.
@@ -41,12 +63,6 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 		return 0, fmt.Errorf("abs root: %w", err)
 	}
 
-	// Resolve pdftotext once — LookPath scans PATH on every call.
-	pdftotextBin, err := exec.LookPath("pdftotext")
-	if err != nil {
-		slog.Warn("pdftotext not found in PATH, PDFs will be skipped")
-	}
-
 	total := 0
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -54,72 +70,175 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 		}
 		if d.IsDir() {
 			if path == absRoot {
-				return nil // never skip the root itself
+				return nil
 			}
 			return skipDir(d.Name())
 		}
 		if isPDF(path) {
-			text, err := extractPDFText(ctx, pdftotextBin, path)
+			text, err := w.extractPDF(ctx, path)
 			if err != nil {
 				slog.Warn("skip pdf", "path", path, "err", err)
 				return nil
 			}
-
-			chunks := chunk(text, chunkSize, chunkOverlap)
-			for _, c := range chunks {
-				c = strings.TrimSpace(c)
-				if len(c) < 50 {
-					continue
-				}
-				payload, _ := json.Marshal(graph.IngestPayload{
-					Content: c,
-					Source:  path,
-					GroupID: w.groupID,
-				})
-				if err := w.db.PushJob(ctx, store.JobTypeIngest, string(payload)); err != nil {
-					return fmt.Errorf("push job: %w", err)
-				}
-				total++
-			}
-			return nil
+			return w.enqueueChunks(ctx, text, path, &total)
 		}
-
 		if !isText(path) {
 			return nil
 		}
-
 		data, err := os.ReadFile(path)
 		if err != nil {
 			slog.Warn("skip unreadable file", "path", path, "err", err)
 			return nil
 		}
 		if !utf8.Valid(data) {
-			return nil // binary file
+			return nil
 		}
-
-		chunks := chunk(string(data), chunkSize, chunkOverlap)
-		for _, c := range chunks {
-			c = strings.TrimSpace(c)
-			if len(c) < 50 {
-				continue // too short to be meaningful
-			}
-
-			payload, _ := json.Marshal(graph.IngestPayload{
-				Content: c,
-				Source:  path,
-				GroupID: w.groupID,
-			})
-			if err := w.db.PushJob(ctx, store.JobTypeIngest, string(payload)); err != nil {
-				return fmt.Errorf("push job: %w", err)
-			}
-			total++
-		}
-		return nil
+		return w.enqueueChunks(ctx, string(data), path, &total)
 	})
 	return total, err
 }
 
-// skipDir returns filepath.SkipDir for well-known noise directories.
+// extractPDF tries pdftotext → tesseract → gemma3 in order.
+func (w *Walker) extractPDF(ctx context.Context, path string) (string, error) {
+	// 1. pdftotext
+	if w.pdftotextBin != "" {
+		text, err := extractPDFText(ctx, w.pdftotextBin, path)
+		if err == nil && text != "" {
+			return text, nil
+		}
+	}
+
+	// Scanned PDF — need image-based OCR.
+	if w.pdftoppmBin == "" {
+		return "", fmt.Errorf("scanned PDF requires pdftoppm (install poppler)")
+	}
+
+	// 2. Tesseract
+	if w.tesseractBin != "" {
+		text, err := w.ocrPDFTesseract(ctx, path)
+		if err == nil && text != "" {
+			return text, nil
+		}
+		slog.Warn("tesseract failed", "path", path, "err", err)
+	}
+
+	// 3. gemma3 fallback
+	if w.ocrClient != nil {
+		slog.Warn("⚠ using gemma3 OCR fallback — accuracy is lower than Tesseract; install tesseract for better results",
+			"path", path)
+		return w.ocrPDFGemma3(ctx, path)
+	}
+
+	return "", fmt.Errorf("scanned PDF: no OCR available (install tesseract)")
+}
+
+func (w *Walker) ocrPDFTesseract(ctx context.Context, pdfPath string) (string, error) {
+	pages, cleanup, err := w.pdfToImages(ctx, pdfPath)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	var texts []string
+	for _, page := range pages {
+		out, err := w.runTesseract(ctx, page)
+		if err != nil {
+			slog.Warn("tesseract page failed", "page", page, "err", err)
+			continue
+		}
+		if out != "" {
+			texts = append(texts, out)
+		}
+	}
+	if len(texts) == 0 {
+		return "", fmt.Errorf("tesseract produced no output")
+	}
+	return strings.Join(texts, "\n\n"), nil
+}
+
+func (w *Walker) ocrPDFGemma3(ctx context.Context, pdfPath string) (string, error) {
+	pages, cleanup, err := w.pdfToImages(ctx, pdfPath)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	var texts []string
+	for _, page := range pages {
+		data, err := os.ReadFile(page)
+		if err != nil {
+			slog.Warn("read page image failed", "page", page, "err", err)
+			continue
+		}
+		out, err := w.ocrClient.OCR(ctx, data)
+		if err != nil {
+			slog.Warn("gemma3 OCR page failed", "page", page, "err", err)
+			continue
+		}
+		if out != "" {
+			texts = append(texts, out)
+		}
+	}
+	if len(texts) == 0 {
+		return "", fmt.Errorf("gemma3 OCR produced no output")
+	}
+	return strings.Join(texts, "\n\n"), nil
+}
+
+func (w *Walker) pdfToImages(ctx context.Context, pdfPath string) ([]string, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "ultramemory-ocr-*")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("temp dir: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+
+	prefix := filepath.Join(tmpDir, "page")
+	if _, err := exec.CommandContext(ctx, w.pdftoppmBin,
+		"-r", "200", "-jpeg", pdfPath, prefix,
+	).Output(); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("pdftoppm: %w", err)
+	}
+
+	pages, err := filepath.Glob(prefix + "-*.jpg")
+	if err != nil || len(pages) == 0 {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("pdftoppm produced no pages")
+	}
+	sort.Strings(pages)
+	return pages, cleanup, nil
+}
+
+// runTesseract must run from the image's directory — tesseract rejects absolute paths.
+func (w *Walker) runTesseract(ctx context.Context, imagePath string) (string, error) {
+	cmd := exec.CommandContext(ctx, w.tesseractBin, filepath.Base(imagePath), "stdout")
+	cmd.Dir = filepath.Dir(imagePath)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (w *Walker) enqueueChunks(ctx context.Context, text, source string, total *int) error {
+	for _, c := range chunk(text, chunkSize, chunkOverlap) {
+		c = strings.TrimSpace(c)
+		if len(c) < 50 {
+			continue
+		}
+		payload, _ := json.Marshal(graph.IngestPayload{
+			Content: c,
+			Source:  source,
+			GroupID: w.groupID,
+		})
+		if err := w.db.PushJob(ctx, store.JobTypeIngest, string(payload)); err != nil {
+			return fmt.Errorf("push job: %w", err)
+		}
+		*total++
+	}
+	return nil
+}
+
 func skipDir(name string) error {
 	skip := map[string]bool{
 		".git": true, "node_modules": true, "vendor": true,
@@ -132,7 +251,6 @@ func skipDir(name string) error {
 	return nil
 }
 
-// isText returns true for file extensions we can meaningfully extract from.
 func isText(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	ok := map[string]bool{
@@ -145,32 +263,18 @@ func isText(path string) bool {
 	return ok[ext]
 }
 
-// isPDF returns true when path has a .pdf extension.
 func isPDF(path string) bool {
 	return strings.ToLower(filepath.Ext(path)) == ".pdf"
 }
 
-// extractPDFText runs pdftotext and returns the extracted plain text.
-// Returns an error if pdftotext is not in PATH or extraction fails.
 func extractPDFText(ctx context.Context, bin, path string) (string, error) {
-	if bin == "" {
-		return "", fmt.Errorf("pdftotext not available")
-	}
-
 	out, err := exec.CommandContext(ctx, bin, path, "-").Output()
 	if err != nil {
-		return "", fmt.Errorf("pdftotext failed: %w", err)
+		return "", fmt.Errorf("pdftotext: %w", err)
 	}
-
-	text := strings.TrimSpace(string(out))
-	if text == "" {
-		return "", fmt.Errorf("pdftotext produced empty output for %s", path)
-	}
-
-	return text, nil
+	return strings.TrimSpace(string(out)), nil
 }
 
-// chunk splits text into overlapping windows of at most size runes.
 func chunk(text string, size, overlap int) []string {
 	runes := []rune(text)
 	if len(runes) <= size {

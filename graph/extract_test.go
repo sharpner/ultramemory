@@ -8,6 +8,117 @@ import (
 	"github.com/sharpner/ultramemory/store"
 )
 
+func TestProcess_EntityCreated(t *testing.T) {
+	db := openExtractTestDB(t)
+	ctx := context.Background()
+	client := newMockClient(t,
+		entityJSON("Jonathan Harker", "Count Dracula"),
+		edgeJSON("TRAVELS_TO", "Harker travels to Transylvania"),
+	)
+	ext := New(db, client, 0.5)
+
+	if err := ext.Process(ctx, "Jonathan Harker travels to meet Count Dracula.", "test.txt", "g"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.CountEntities(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 entities after Process, got %d", n)
+	}
+}
+
+func TestProcess_EdgeCreated(t *testing.T) {
+	db := openExtractTestDB(t)
+	ctx := context.Background()
+	client := newMockClient(t,
+		entityJSON("Jonathan Harker", "Count Dracula"),
+		edgeJSON("TRAVELS_TO", "Harker travels to Transylvania"),
+	)
+	ext := New(db, client, 0.5)
+
+	if err := ext.Process(ctx, "Jonathan Harker travels to meet Count Dracula.", "test.txt", "g"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.CountEdges(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 edge after Process, got %d", n)
+	}
+}
+
+func TestProcess_EpisodeLinked(t *testing.T) {
+	db := openExtractTestDB(t)
+	ctx := context.Background()
+	client := newMockClient(t,
+		entityJSON("Jonathan Harker"),
+		`{"edges":[]}`,
+	)
+	ext := New(db, client, 0.5)
+
+	if err := ext.Process(ctx, "Jonathan Harker arrived at the castle.", "castle.txt", "g"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.CountEpisodes(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 episode after Process, got %d", n)
+	}
+}
+
+func TestProcess_ExactNameDedup(t *testing.T) {
+	db := openExtractTestDB(t)
+	ctx := context.Background()
+
+	client := newMockClient(t, entityJSON("Jonathan Harker"), `{"edges":[]}`)
+	ext := New(db, client, 0.5)
+
+	if err := ext.Process(ctx, "Jonathan Harker arrived.", "a.txt", "g"); err != nil {
+		t.Fatal(err)
+	}
+
+	client2 := newMockClient(t, entityJSON("JONATHAN HARKER"), `{"edges":[]}`)
+	ext2 := New(db, client2, 0.5)
+
+	if err := ext2.Process(ctx, "JONATHAN HARKER left.", "b.txt", "g"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, _ := db.CountEntities(ctx, "g")
+	if n != 1 {
+		t.Errorf("exact-name dedup (case-insensitive): expected 1 entity, got %d", n)
+	}
+}
+
+func TestProcess_SourcePopulated(t *testing.T) {
+	db := openExtractTestDB(t)
+	ctx := context.Background()
+	client := newMockClient(t, entityJSON("Jonathan Harker"), `{"edges":[]}`)
+	ext := New(db, client, 0.5)
+
+	if err := ext.Process(ctx, "Jonathan Harker arrived.", "dracula/chapter1.txt", "g"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retrieve entity UUID via FTS
+	entities, err := db.SearchEntitiesFTS(ctx, "Jonathan", "g", 1)
+	if err != nil || len(entities) == 0 {
+		t.Fatalf("entity not found: err=%v, count=%d", err, len(entities))
+	}
+	src := db.FirstEntitySource(ctx, entities[0].UUID, "g")
+	if src != "dracula/chapter1.txt" {
+		t.Errorf("expected source %q, got %q", "dracula/chapter1.txt", src)
+	}
+}
+
 func openExtractTestDB(t *testing.T) *store.DB {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "extract-test-*.db")
