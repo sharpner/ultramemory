@@ -126,13 +126,14 @@ func main() {
 
 	case "bench":
 		fs := flag.NewFlagSet("bench", flag.ExitOnError)
-		limit    := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
-		baseline := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
-		qaModel  := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
-		qaOnly   := fs.Bool("qa-only", false, "skip ingestion, run QA on existing DB (use with -qa-model for fast model swapping)")
+		limit     := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
+		baseline  := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
+		qaModel   := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
+		qaOnly    := fs.Bool("qa-only", false, "skip ingestion, run QA on existing DB (use with -qa-model for fast model swapping)")
+		judgeModel := fs.String("judge", "", "LLM judge model for semantic evaluation: 'mistral-small-2506' (requires MISTRAL_API_KEY)")
 		_ = fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
-			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] [-qa-only] <locomo10.json>")
+			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] [-qa-only] [-judge MODEL] <locomo10.json>")
 		}
 		if !*qaOnly {
 			must(client.Ping(ctx), "ping ollama")
@@ -142,9 +143,10 @@ func main() {
 			}
 		}
 
+		mistralKey := os.Getenv("MISTRAL_API_KEY")
+
 		var qaAnswerer llm.Answerer
 		if *qaModel != "" {
-			mistralKey := os.Getenv("MISTRAL_API_KEY")
 			if mistralKey == "" {
 				fatalf("MISTRAL_API_KEY not set — required for -qa-model %s", *qaModel)
 			}
@@ -152,7 +154,16 @@ func main() {
 			slog.Info("QA answerer", "model", *qaModel, "provider", "mistral")
 		}
 
-		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, resolveThreshold, *limit, *baseline, *qaOnly)
+		var judge bench.Judge
+		if *judgeModel != "" {
+			if mistralKey == "" {
+				fatalf("MISTRAL_API_KEY not set — required for -judge %s", *judgeModel)
+			}
+			judge = llm.NewMistral(mistralKey, *judgeModel)
+			slog.Info("LLM judge", "model", *judgeModel, "provider", "mistral")
+		}
+
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, judge, resolveThreshold, *limit, *baseline, *qaOnly)
 		must(err, "bench")
 		bench.PrintResult(result)
 

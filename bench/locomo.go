@@ -99,10 +99,12 @@ type QA struct {
 
 // CategoryScore holds aggregated metrics for one QA category.
 type CategoryScore struct {
-	Category string
-	Count    int
-	AvgF1    float64
-	AvgEM    float64
+	Category    string
+	Count       int
+	AvgF1       float64
+	AvgEM       float64
+	AvgJudge    float64 // LLM-judge score (0 if no judge configured)
+	JudgeCount  int     // number of judged answers
 }
 
 // Result holds the full benchmark output.
@@ -110,22 +112,30 @@ type Result struct {
 	Overall    CategoryScore
 	ByCategory []CategoryScore
 	Duration   time.Duration
+	HasJudge   bool // whether LLM-judge scores are included
 }
 
 type qaScore struct {
-	category int
-	f1       float64
-	em       float64
+	category  int
+	f1        float64
+	em        float64
+	judge     float64 // 1.0 = correct per LLM judge, 0 = incorrect, -1 = not judged
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
+
+// Judge is satisfied by any LLM that can evaluate answer correctness.
+type Judge interface {
+	Judge(ctx context.Context, question, gold, prediction string) (bool, error)
+}
 
 // RunLoCoMo evaluates ultramemory against the LoCoMo benchmark.
 // Set limit > 0 to evaluate only the first N conversations.
 // When baseline is true, only raw episode FTS is used (no graph extraction).
 // qaAnswerer overrides the QA answering model when set (extraction always uses client).
-// When qaOnly is true, ingestion is skipped — DB must already be populated (for rerunning QA with a different model).
-func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, qaAnswerer llm.Answerer, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
+// When qaOnly is true, ingestion is skipped — DB must already be populated.
+// judge optionally evaluates each answer for semantic correctness (LLM-as-judge).
+func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, qaAnswerer llm.Answerer, judge Judge, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
 	conversations, err := parseLoCoMo(dataPath)
 	if err != nil {
 		return nil, err
@@ -219,7 +229,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 				episodes, err := db.SearchEpisodesFTS(ctx, qa.Question, groupID, 10)
 				if err != nil {
 					slog.Warn("search failed", "question", qa.Question, "err", err)
-					scores = append(scores, qaScore{qa.Category, 0, 0})
+					scores = append(scores, qaScore{qa.Category, 0, 0, -1})
 					continue
 				}
 				contextStr = formatEpisodeContext(episodes)
@@ -227,7 +237,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 				results, err := graph.Search(ctx, db, client, qa.Question, groupID, 25)
 				if err != nil {
 					slog.Warn("search failed", "question", qa.Question, "err", err)
-					scores = append(scores, qaScore{qa.Category, 0, 0})
+					scores = append(scores, qaScore{qa.Category, 0, 0, -1})
 					continue
 				}
 				contextStr = formatContext(results)
@@ -237,13 +247,24 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 			answer, err := answerer.Answer(ctx, qaSystem, prompt, 0)
 			if err != nil {
 				slog.Warn("answer failed", "question", qa.Question, "err", err)
-				scores = append(scores, qaScore{qa.Category, 0, 0})
+				scores = append(scores, qaScore{qa.Category, 0, 0, -1})
 				continue
 			}
 
 			f1 := tokenF1(answer, qa.Answer)
 			em := exactMatch(answer, qa.Answer)
-			scores = append(scores, qaScore{qa.Category, f1, em})
+			judgeScore := -1.0
+			if judge != nil {
+				correct, err := judge.Judge(ctx, qa.Question, qa.Answer, answer)
+				if err != nil {
+					slog.Warn("judge failed", "question", qa.Question, "err", err)
+				} else if correct {
+					judgeScore = 1.0
+				} else {
+					judgeScore = 0.0
+				}
+			}
+			scores = append(scores, qaScore{qa.Category, f1, em, judgeScore})
 
 			if (qi+1)%25 == 0 {
 				slog.Info("qa progress",
@@ -261,13 +282,24 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 // PrintResult outputs the benchmark results as a table.
 func PrintResult(r *Result) {
 	fmt.Printf("\n── LoCoMo Benchmark Results ──────────────────────────────\n\n")
-	fmt.Printf("%-14s  %5s  %7s  %7s\n", "Category", "Count", "F1", "EM")
-	fmt.Printf("%-14s  %5s  %7s  %7s\n", "──────────────", "─────", "───────", "───────")
-	for _, c := range r.ByCategory {
-		fmt.Printf("%-14s  %5d  %6.1f%%  %6.1f%%\n", c.Category, c.Count, c.AvgF1*100, c.AvgEM*100)
+	if r.HasJudge {
+		fmt.Printf("%-14s  %5s  %7s  %7s  %8s\n", "Category", "Count", "F1", "EM", "Judge%")
+		fmt.Printf("%-14s  %5s  %7s  %7s  %8s\n", "──────────────", "─────", "───────", "───────", "────────")
+		for _, c := range r.ByCategory {
+			fmt.Printf("%-14s  %5d  %6.1f%%  %6.1f%%  %7.1f%%\n", c.Category, c.Count, c.AvgF1*100, c.AvgEM*100, c.AvgJudge*100)
+		}
+		fmt.Printf("%-14s  %5s  %7s  %7s  %8s\n", "──────────────", "─────", "───────", "───────", "────────")
+		fmt.Printf("%-14s  %5d  %6.1f%%  %6.1f%%  %7.1f%%\n", "OVERALL", r.Overall.Count, r.Overall.AvgF1*100, r.Overall.AvgEM*100, r.Overall.AvgJudge*100)
+		fmt.Printf("\n(Judge: mistral-small-2506, n=%d)\n", r.Overall.JudgeCount)
+	} else {
+		fmt.Printf("%-14s  %5s  %7s  %7s\n", "Category", "Count", "F1", "EM")
+		fmt.Printf("%-14s  %5s  %7s  %7s\n", "──────────────", "─────", "───────", "───────")
+		for _, c := range r.ByCategory {
+			fmt.Printf("%-14s  %5d  %6.1f%%  %6.1f%%\n", c.Category, c.Count, c.AvgF1*100, c.AvgEM*100)
+		}
+		fmt.Printf("%-14s  %5s  %7s  %7s\n", "──────────────", "─────", "───────", "───────")
+		fmt.Printf("%-14s  %5d  %6.1f%%  %6.1f%%\n", "OVERALL", r.Overall.Count, r.Overall.AvgF1*100, r.Overall.AvgEM*100)
 	}
-	fmt.Printf("%-14s  %5s  %7s  %7s\n", "──────────────", "─────", "───────", "───────")
-	fmt.Printf("%-14s  %5d  %6.1f%%  %6.1f%%\n", "OVERALL", r.Overall.Count, r.Overall.AvgF1*100, r.Overall.AvgEM*100)
 	fmt.Printf("\nDuration: %s\n", r.Duration.Round(time.Second))
 }
 
@@ -383,10 +415,10 @@ func formatContext(results []graph.SearchResult) string {
 	if len(results) == 0 {
 		return "(no relevant facts found)"
 	}
-	// Three-pass: facts (edges) → entity profiles → dialogue (episodes).
-	// LLMs attend more strongly to early context; concise facts first helps
-	// single-hop questions. Entity descriptions help inference questions about
-	// character traits and preferences ("Would Caroline...?").
+	// Two-pass: facts (edges) first for primacy bias, then dialogue (episodes).
+	// Entity profiles skipped — they cause entity-attribution confusion in adversarial
+	// questions ("What was grandpa's gift?" when grandma gave it). Entity descriptions
+	// in facts (edges) already capture who-did-what relationships without the noise.
 	var b strings.Builder
 	n := 0
 	for _, r := range results {
@@ -395,18 +427,6 @@ func formatContext(results []graph.SearchResult) string {
 		}
 		n++
 		fmt.Fprintf(&b, "%d. %s\n", n, r.Body)
-	}
-	for _, r := range results {
-		if r.Type != "entity" {
-			continue
-		}
-		// Only show entity profiles that have a real description (not just entity type).
-		// Bare "Person" or "Concept" adds noise without signal.
-		if !strings.Contains(r.Body, ":") {
-			continue
-		}
-		n++
-		fmt.Fprintf(&b, "%d. [%s] %s\n", n, r.Title, r.Body)
 	}
 	for _, r := range results {
 		if r.Type != "episode" {
@@ -522,9 +542,11 @@ func exactMatch(prediction, gold string) float64 {
 
 func aggregate(scores []qaScore, duration time.Duration) *Result {
 	type acc struct {
-		f1Sum float64
-		emSum float64
-		count int
+		f1Sum      float64
+		emSum      float64
+		judgeSum   float64
+		count      int
+		judgeCount int
 	}
 	byCategory := map[int]*acc{}
 	overall := &acc{}
@@ -539,16 +561,28 @@ func aggregate(scores []qaScore, duration time.Duration) *Result {
 		overall.f1Sum += s.f1
 		overall.emSum += s.em
 		overall.count++
+		if s.judge >= 0 {
+			byCategory[s.category].judgeSum += s.judge
+			byCategory[s.category].judgeCount++
+			overall.judgeSum += s.judge
+			overall.judgeCount++
+		}
 	}
 
-	result := &Result{Duration: duration}
+	hasJudge := overall.judgeCount > 0
+	result := &Result{Duration: duration, HasJudge: hasJudge}
 	if overall.count > 0 {
-		result.Overall = CategoryScore{
-			Category: "overall",
-			Count:    overall.count,
-			AvgF1:    overall.f1Sum / float64(overall.count),
-			AvgEM:    overall.emSum / float64(overall.count),
+		cs := CategoryScore{
+			Category:   "overall",
+			Count:      overall.count,
+			AvgF1:      overall.f1Sum / float64(overall.count),
+			AvgEM:      overall.emSum / float64(overall.count),
+			JudgeCount: overall.judgeCount,
 		}
+		if overall.judgeCount > 0 {
+			cs.AvgJudge = overall.judgeSum / float64(overall.judgeCount)
+		}
+		result.Overall = cs
 	}
 
 	cats := make([]int, 0, len(byCategory))
@@ -563,12 +597,17 @@ func aggregate(scores []qaScore, duration time.Duration) *Result {
 		if name == "" {
 			name = "cat-" + strconv.Itoa(c)
 		}
-		result.ByCategory = append(result.ByCategory, CategoryScore{
-			Category: name,
-			Count:    a.count,
-			AvgF1:    a.f1Sum / float64(a.count),
-			AvgEM:    a.emSum / float64(a.count),
-		})
+		cs := CategoryScore{
+			Category:   name,
+			Count:      a.count,
+			AvgF1:      a.f1Sum / float64(a.count),
+			AvgEM:      a.emSum / float64(a.count),
+			JudgeCount: a.judgeCount,
+		}
+		if a.judgeCount > 0 {
+			cs.AvgJudge = a.judgeSum / float64(a.judgeCount)
+		}
+		result.ByCategory = append(result.ByCategory, cs)
 	}
 
 	return result
