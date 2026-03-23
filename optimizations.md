@@ -404,4 +404,71 @@ Code:
 - graph/search.go: SearchResult.ValidAt Feld
 - bench/locomo.go: temporalTag() bevorzugt ISO-Date über Session-Tag
 
-Result: awaiting completion
+| Category | F1 | EM | Delta vs v19 |
+|----------|-----|-----|-------------|
+| single-hop | 27.4% | 3.1% | +0.3% |
+| multi-hop | 32.2% | 2.7% | -9.8% |
+| temporal | 9.4% | 0.0% | -2.2% |
+| open-domain | 55.9% | 18.6% | +0.7% |
+| adversarial | 47.5% | 18.1% | +4.1% |
+| **OVERALL** | **40.2%** | **10.1%** | **-2.4%** |
+
+Duration: ~7m
+**REVERTED** — ISO-Datumsanzeige zerstört multi-hop (-9.7% vs v19). Nur ~50% der Kanten haben valid_at → inkonsistente Datumsformate verwirren das LLM. Session-Tags `[session_N]` sind konsistenter (alle Kanten).
+ValidAt-Feld bleibt in SearchResult für zukünftige Verwendung, wird aber nicht im Kontext angezeigt.
+
+### Iteration 21 — v21: Edge-Vector-Threshold 0.5 (war 0.3) (2026-03-23)
+Hypothese: Edge vector search bei 0.3 introduziert semantische Nahe-Treffer (grandfather≈grandmother) die adversarielle "unknown"-Fragen verwirren. Threshold 0.3→0.5.
+
+| Category | F1 | EM | Delta vs v19 |
+|----------|-----|-----|-------------|
+| single-hop | 28.7% | 3.1% | +1.6% |
+| multi-hop | **42.2%** | 5.4% | +0.2% |
+| temporal | 9.4% | 0.0% | -2.2% |
+| open-domain | 55.6% | 21.4% | +0.4% |
+| adversarial | 44.7% | 18.1% | +1.3% |
+| **OVERALL** | **43.2%** | **11.6%** | **+0.6%** |
+
+Duration: ~7m. **Neues Overall-Best: 43.2% F1!**
+Edge threshold 0.5 hilft adversarial (+1.3%) ohne andere Kategorien zu beschädigen. Semantische Nahe-Treffer bestätigt als Störquelle.
+Adversarial gap zu v11 (52.7%) immer noch bei -8.0% — Hypothese: Edge vector search war in v11 gar nicht vorhanden.
+
+### Iteration 22 — v22: Entity-Vector-Threshold 0.5 (war 0.3) REVERTED (2026-03-23)
+Hypothese: Gleicher Effekt für Entity vectors — threshold 0.3→0.5 reduziert MAGMA-Seeds und damit Noise.
+
+| Category | F1 | EM | Delta vs v21 |
+|----------|-----|-----|-------------|
+| single-hop | 26.5% | 3.1% | -2.2% |
+| multi-hop | 40.8% | 5.4% | -1.4% |
+| temporal | 9.4% | 0.0% | 0.0% |
+| open-domain | 55.6% | 21.4% | 0.0% |
+| adversarial | 41.5% | 17.0% | **-3.2%** |
+| **OVERALL** | **41.9%** | **11.1%** | **-1.3%** |
+
+**REVERTED** — Entity threshold 0.5 reduziert MAGMA-Seeds → weniger Graph-Traversal → schlechtere adversarial (-3.2%). Entity threshold bleibt 0.3.
+Entscheidung: Entity-Embeddings sind primär MAGMA-Seeds, nicht direkte Antwortquellen. Niedrigerer Threshold behält mehr Graph-Verbindungen.
+
+### Iteration 23 — v23: Edge Vector Search komplett deaktiviert (2026-03-23)
+Hypothese: v11 hatte KEIN Edge Vector Search und erzielte 52.7% adversarial. v19 hat Edge Vector Search bei 0.3 → adversarial 43.4%. Schwellenwert-Erhöhung auf 0.5 (v21) brachte nur +1.3%. Vollständige Entfernung soll die Kausalität bestätigen.
+
+Code: Edge vector block in graph/search.go deaktiviert. edgeVec bleibt nil → Kanten nur via FTS gefunden.
+
+| Category | F1 | EM | Delta vs v21 |
+|----------|-----|-----|-------------|
+| single-hop | **36.6%** | 6.2% | **+7.9%** |
+| multi-hop | 42.2% | 5.4% | 0.0% |
+| temporal | 11.3% | 0.0% | +1.9% |
+| open-domain | **56.7%** | 24.3% | +1.1% |
+| adversarial | 43.7% | 14.9% | -1.0% |
+| **OVERALL** | **44.7%** | **14.1%** | **+1.5%** |
+
+Duration: 8m33s. **Neues Overall-Best: 44.7% F1!**
+
+**Ergebnis**: Edge vector search entfernt → BESSER overall (+1.5%). Single-hop springt +7.9%!
+Edge vector search bei Threshold 0.5 half adversarial minimal (+1%), kostete aber single-hop massiv (-7.9%).
+**Conclusion**: Edge vector search ist eine Fehlinvestition in diesem Setup. FTS + MAGMA-traversal + entity/episode vectors sind ausreichend.
+
+**Adversarial-Gap zu v11 (52.7%) bleibt ungeklärt** — kein der getesteten Hypothesen erklärt den vollen -9% Gap.
+Mögliche Ursachen: v11 DB war frisch ingested (andere Extraktionsqualität), oder stochastische Varianz bei 47 Fragen.
+
+

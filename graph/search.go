@@ -84,21 +84,11 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 			entityVec = entityVec[:limit*2]
 		}
 
-		edges, _ := db.AllEdgesWithEmbeddings(ctx, groupID)
-		for _, e := range edges {
-			sim := store.CosineSimilarity(qEmb, e.Embedding)
-			// Threshold 0.5 (was 0.3): edge vector search at 0.3 introduces
-			// semantic near-misses (grandfather≈grandmother) that confuse adversarial
-			// questions. Stricter threshold reduces false positives.
-			if sim > 0.5 {
-				edgeVec = append(edgeVec, scored{e.UUID, sim})
-				edgByUUID[e.UUID] = e
-			}
-		}
-		sort.Slice(edgeVec, func(i, j int) bool { return edgeVec[i].score > edgeVec[j].score })
-		if len(edgeVec) > limit*2 {
-			edgeVec = edgeVec[:limit*2]
-		}
+		// v23 test: edge vector search disabled. v11 had no edge vector search → 52.7% adversarial.
+		// v19 reintroduced it at 0.3 threshold → adversarial dropped to 43.4%. Hypothesis: edge
+		// vector search introduces semantic near-misses (grandfather≈grandmother) that hurt
+		// adversarial "unknown" questions. Removing entirely to confirm causation.
+		// edgeVec remains nil — falls back to FTS-only for edge retrieval.
 
 		episodes, _ := db.AllEpisodesWithEmbeddings(ctx, groupID)
 		for _, e := range episodes {
