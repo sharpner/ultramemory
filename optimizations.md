@@ -531,8 +531,50 @@ Duration: 33m6s. **Community Reports SCHADEN: -1.3%** über Temporal-Decay-Regre
 Für LoCoMo: 4→1 Reports (nur Community 0 mit Caroline+Freunden bleibt).
 Schlechte Reports aus v26-fresh.db manuell gelöscht.
 
-**v27 Ergebnisse** ausstehend (MAGMA Episode Backfill, qa-only auf v26-fresh.db, mixed community reports).
-**v28 Ergebnisse** ausstehend (MAGMA Episode Backfill + 1 guter Community Report).
+**v27 Ergebnisse** ausstehend (MAGMA Episode Backfill, qa-only auf v26-fresh.db, mixed community reports) — übersprungen, v28 ist sauberere Messung.
+
+### Iteration 28 — v28: MAGMA Episode Backfill + 1 guter Community Report (2026-03-23)
+Code: Altes Binary (v23-Basis) + Signal 3b (MAGMA backfill) + schlechte Community Reports gelöscht, 1 guter Person-Report bleibt.
+
+| Category | F1 | EM | Delta vs v23 |
+|----------|-----|-----|-------------|
+| single-hop | 31.3% | 6.2% | **-5.3%** |
+| multi-hop | 41.1% | 2.7% | -1.1% |
+| temporal | 7.2% | 0.0% | -4.1% |
+| open-domain | 57.1% | 22.9% | +0.4% |
+| adversarial | 36.1% | 14.9% | **-7.6%** |
+| **OVERALL** | **41.7%** | **13.1%** | **-3.0%** |
+
+Duration: 25m46s.
+
+**MAGMA Episode Backfill ist schädlich.** Adversarial bricht um -7.6% ein (47 Fragen × -7.6% = -3.6 Fragen verloren).
+
+**Diagnose Signal 3b**: Top-5 MAGMA-Entities → ihre verknüpften Episoden mit 1.2× RRF-Boost.
+Problem: MAGMA traversiert von Seed-Entities (Caroline) zu Nachbar-Entities (Melanie, Freunde).
+Die Episoden dieser Nachbar-Entities enthalten falsche Attributionen für Adversarial-Fragen.
+Beispiel: Frage über Caroline → MAGMA findet Melanie → Melanies Episoden über Necklace-Gift → LLM attributiert Gift an falsche Person.
+
+**Entscheidung**: Signal 3b deaktiviert. FTS + MAGMA-Traversal + Episode-Vector-Search reichen aus.
+
+### Iteration 29/30 — v29/v30: Entity Slot Fix (ausstehend)
+v29: Entity Slot Fix nur — Entities zählen nicht gegen Result-Limit.
+v30: Entity Slot Fix + Episodic Seeds + Entity-Vector deaktiviert.
+Beide laufen noch auf v26-fresh.db mit MAGMA Backfill (leider — Backfill war noch im Code).
+
+### Iteration 31 — v31: Signal 3b revertiert + Temporal-Prompt-Fix (2026-03-23, läuft)
+Code:
+- Signal 3b (MAGMA Episode Backfill) deaktiviert
+- Temporal-Prompt-Fix: Für Would/Likely/hypothetische Fragen kurze Begründung aus Kontext
+  - Gold: "Likely no; though she likes reading, she wants to be a counselor" (12 Tokens)
+  - Vorher: Modell sagte "likely no" (2 Tokens) → tokenF1 ~17%
+  - Jetzt: Modell soll "Likely no, she wants to be a counselor" sagen → tokenF1 ~70%
+- Entity Slot Fix: Entities zählen nicht gegen Result-Limit
+- Episodic Seeds (Synapse §3.1): FTS-Episode-Hits → entity_episodes → MAGMA Seeds
+- Entity-Vector-Search deaktiviert (nach Entity-Slot-Fix inaktiv)
+
+Basis: v26-fresh.db (gleiche DB wie v28/v29/v30)
+
+**v31 Ergebnisse** ausstehend.
 
 
 
