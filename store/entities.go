@@ -90,7 +90,7 @@ func (d *DB) AllEntitiesWithEmbeddings(ctx context.Context, groupID string) ([]E
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []Entity
 	for rows.Next() {
@@ -120,7 +120,7 @@ func (d *DB) SearchEntitiesFTS(ctx context.Context, query, groupID string, limit
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []Entity
 	for rows.Next() {

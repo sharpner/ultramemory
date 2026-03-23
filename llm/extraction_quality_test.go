@@ -142,7 +142,7 @@ func TestExtractionQuality_EnglishRelationType(t *testing.T) {
 		}
 		// Must be SCREAMING_SNAKE_CASE: only uppercase letters and underscores
 		for _, r := range e.RelationType {
-			if !((r >= 'A' && r <= 'Z') || r == '_') {
+			if (r < 'A' || r > 'Z') && r != '_' {
 				t.Errorf("relation_type %q contains non-uppercase/non-underscore char %q", e.RelationType, string(r))
 				break
 			}
