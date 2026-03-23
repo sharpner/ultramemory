@@ -72,9 +72,9 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		entities, _ := db.AllEntitiesWithEmbeddings(ctx, groupID)
 		for _, e := range entities {
 			sim := store.CosineSimilarity(qEmb, e.Embedding)
-			// Threshold 0.5 (was 0.3): same rationale as edge threshold —
-			// permissive 0.3 causes near-misses (grandfather≈grandmother entity confusion).
-			if sim > 0.5 {
+			// Threshold 0.3: entity vectors become MAGMA seeds. Higher threshold (0.5)
+			// reduces MAGMA seeds → less graph traversal → worse adversarial (v22 test).
+			if sim > 0.3 {
 				entityVec = append(entityVec, scored{e.UUID, sim})
 				entByUUID[e.UUID] = e
 			}
