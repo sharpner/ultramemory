@@ -85,7 +85,10 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		edges, _ := db.AllEdgesWithEmbeddings(ctx, groupID)
 		for _, e := range edges {
 			sim := store.CosineSimilarity(qEmb, e.Embedding)
-			if sim > 0.3 {
+			// Threshold 0.5 (was 0.3): edge vector search at 0.3 introduces
+			// semantic near-misses (grandfather≈grandmother) that confuse adversarial
+			// questions. Stricter threshold reduces false positives.
+			if sim > 0.5 {
 				edgeVec = append(edgeVec, scored{e.UUID, sim})
 				edgByUUID[e.UUID] = e
 			}
