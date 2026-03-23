@@ -166,6 +166,29 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		rrf["ent:"+a.UUID] += 1.0 / float64(k+rank+1)
 	}
 
+	// Signal 3b: MAGMA episode backfill — episodes linked to top MAGMA entities.
+	// Provides rich dialogue context for multi-hop: when MAGMA discovers Bob via
+	// Alice→KNOWS→Bob, we also retrieve episodes mentioning Bob so the LLM can
+	// read the raw conversation context, not just extracted edge facts.
+	// Boosted 1.2× (less than direct episode search 1.5× — indirect signal).
+	if len(magmaRanked) > 0 {
+		topN := 5
+		if len(magmaRanked) < topN {
+			topN = len(magmaRanked)
+		}
+		magmaUUIDs := make([]string, topN)
+		for i := range topN {
+			magmaUUIDs[i] = magmaRanked[i].UUID
+		}
+		magmaEps, _ := db.EpisodesForEntities(ctx, magmaUUIDs, groupID, limit*2)
+		for _, ep := range magmaEps {
+			epByUUID[ep.UUID] = ep
+		}
+		for rank, ep := range magmaEps {
+			rrf["ep:"+ep.UUID] += 1.2 / float64(k+rank+1)
+		}
+	}
+
 	// Signal 4: Community affinity (Leiden §4 — community-bounded retrieval).
 	// Entities and edges in the same community as seed entities get a boost.
 	communityMap, _ := db.CommunityMap(ctx, groupID)
