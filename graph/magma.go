@@ -35,7 +35,7 @@ type MAGMAConfig struct {
 // (-11%) more than it helps multi-hop (+4.4%). Restoring to paper default.
 func DefaultMAGMAConfig() MAGMAConfig {
 	return MAGMAConfig{
-		BeamWidth: 10,
+		BeamWidth: 20,
 		MaxHops:   5,
 		Threshold: 0,
 		MaxNodes:  200,
