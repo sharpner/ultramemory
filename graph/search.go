@@ -72,7 +72,9 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		entities, _ := db.AllEntitiesWithEmbeddings(ctx, groupID)
 		for _, e := range entities {
 			sim := store.CosineSimilarity(qEmb, e.Embedding)
-			if sim > 0.3 {
+			// Threshold 0.5 (was 0.3): same rationale as edge threshold —
+			// permissive 0.3 causes near-misses (grandfather≈grandmother entity confusion).
+			if sim > 0.5 {
 				entityVec = append(entityVec, scored{e.UUID, sim})
 				entByUUID[e.UUID] = e
 			}
