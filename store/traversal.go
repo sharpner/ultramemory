@@ -34,7 +34,7 @@ func (d *DB) GetNeighbors(ctx context.Context, uuid, groupID string) ([]Neighbor
 	if err != nil {
 		return nil, fmt.Errorf("get neighbors: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var out []NeighborEntity
 	for rows.Next() {

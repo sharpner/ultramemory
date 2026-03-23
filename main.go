@@ -71,7 +71,7 @@ func main() {
 
 	db, err := store.Open(dbPath)
 	must(err, "open db")
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	client := llm.New(ollamaURL, extractModel, embedModel)
 
@@ -282,7 +282,7 @@ func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 		out.Graph.Entities = entities
 		out.Graph.Edges = edges
 		out.Queue = stats
-		json.NewEncoder(os.Stdout).Encode(out)
+		_ = json.NewEncoder(os.Stdout).Encode(out)
 		return
 	}
 

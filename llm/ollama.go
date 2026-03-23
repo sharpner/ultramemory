@@ -302,7 +302,7 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 		return "", 0, fmt.Errorf("ollama request: %w", err)
 	}
 	latency := time.Since(start)
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {

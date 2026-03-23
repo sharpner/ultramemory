@@ -63,7 +63,7 @@ func (m *mockServer) handler() http.Handler {
 	})
 
 	mux.HandleFunc("/api/generate", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"response": "mock OCR text"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"response": "mock OCR text"})
 	})
 
 	return mux

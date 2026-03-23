@@ -96,7 +96,7 @@ func (d *DB) QueueStats(ctx context.Context) (map[string]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	stats := map[string]int{}
 	for rows.Next() {
