@@ -33,7 +33,7 @@ type MAGMAConfig struct {
 // DefaultMAGMAConfig returns paper-aligned defaults (arxiv.org/abs/2601.03236).
 func DefaultMAGMAConfig() MAGMAConfig {
 	return MAGMAConfig{
-		BeamWidth: 10,
+		BeamWidth: 20,
 		MaxHops:   5,
 		Threshold: 0,
 		MaxNodes:  200,

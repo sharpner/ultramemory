@@ -36,9 +36,9 @@ Rules:
 2. Be extremely concise — answer in as few words as possible.
 3. For dates, use the exact format from the context (e.g. "7 May 2023").
 4. For names, give the full name exactly as it appears.
-5. For "Would..." or inference questions, reason based on the person's stated preferences, values, and circumstances from the context. Give a brief yes/no with explanation.
-6. If the context does NOT contain enough information to answer, respond with exactly: unknown
-7. If the question asks about something not mentioned in the context at all, respond with exactly: unknown`
+5. If the context does NOT contain enough information to answer, respond with exactly: unknown
+6. If the question asks about something not mentioned in the context at all, respond with exactly: unknown
+7. Do not guess or make assumptions.`
 
 const chunkSize = 1500
 
@@ -123,7 +123,8 @@ type qaScore struct {
 // RunLoCoMo evaluates ultramemory against the LoCoMo benchmark.
 // Set limit > 0 to evaluate only the first N conversations.
 // When baseline is true, only raw episode FTS is used (no graph extraction).
-func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, resolveThreshold float64, limit int, baseline bool) (*Result, error) {
+// qaAnswerer overrides the QA answering model when set (extraction always uses client).
+func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, qaAnswerer llm.Answerer, resolveThreshold float64, limit int, baseline bool) (*Result, error) {
 	conversations, err := parseLoCoMo(dataPath)
 	if err != nil {
 		return nil, err
@@ -135,6 +136,12 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 	mode := "graph"
 	if baseline {
 		mode = "baseline"
+	}
+
+	// Fall back to client if no dedicated QA answerer provided.
+	answerer := qaAnswerer
+	if answerer == nil {
+		answerer = client
 	}
 
 	start := time.Now()
@@ -223,7 +230,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 			}
 
 			prompt := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", contextStr, qa.Question)
-			answer, err := client.Answer(ctx, qaSystem, prompt, 0)
+			answer, err := answerer.Answer(ctx, qaSystem, prompt, 0)
 			if err != nil {
 				slog.Warn("answer failed", "question", qa.Question, "err", err)
 				scores = append(scores, qaScore{qa.Category, 0, 0})
@@ -387,6 +394,11 @@ func formatContext(results []graph.SearchResult) string {
 	}
 	for _, r := range results {
 		if r.Type != "entity" {
+			continue
+		}
+		// Only show entity profiles that have a real description (not just entity type).
+		// Bare "Person" or "Concept" adds noise without signal.
+		if !strings.Contains(r.Body, ":") {
 			continue
 		}
 		n++

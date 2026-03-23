@@ -126,18 +126,30 @@ func main() {
 
 	case "bench":
 		fs := flag.NewFlagSet("bench", flag.ExitOnError)
-		limit := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
+		limit    := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
 		baseline := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
+		qaModel  := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
 		_ = fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
-			fatalf("usage: ultramemory bench [-limit N] [-baseline] <locomo10.json>")
+			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] <locomo10.json>")
 		}
 		must(client.Ping(ctx), "ping ollama")
 		fmt.Fprintln(os.Stderr, "Warming up model…")
 		if err := client.Warmup(ctx); err != nil {
 			slog.Warn("warmup failed", "err", err)
 		}
-		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, resolveThreshold, *limit, *baseline)
+
+		var qaAnswerer llm.Answerer
+		if *qaModel != "" {
+			mistralKey := os.Getenv("MISTRAL_API_KEY")
+			if mistralKey == "" {
+				fatalf("MISTRAL_API_KEY not set — required for -qa-model %s", *qaModel)
+			}
+			qaAnswerer = llm.NewMistral(mistralKey, *qaModel)
+			slog.Info("QA answerer", "model", *qaModel, "provider", "mistral")
+		}
+
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, resolveThreshold, *limit, *baseline)
 		must(err, "bench")
 		bench.PrintResult(result)
 
