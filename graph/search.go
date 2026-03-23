@@ -47,6 +47,18 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		score float64
 	}
 
+	// Lookup maps for building results — populated from FTS first, then vector.
+	// Vector-only hits (no FTS match) must be in these maps too, otherwise they
+	// are silently dropped when converting RRF scores to SearchResult values.
+	entByUUID := map[string]store.Entity{}
+	for _, e := range entFTS {
+		entByUUID[e.UUID] = e
+	}
+	edgByUUID := map[string]store.Edge{}
+	for _, e := range edgeFTS {
+		edgByUUID[e.UUID] = e
+	}
+
 	var entityVec, edgeVec []scored
 
 	if len(qEmb) > 0 {
@@ -55,6 +67,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 			sim := store.CosineSimilarity(qEmb, e.Embedding)
 			if sim > 0.3 {
 				entityVec = append(entityVec, scored{e.UUID, sim})
+				entByUUID[e.UUID] = e
 			}
 		}
 		sort.Slice(entityVec, func(i, j int) bool { return entityVec[i].score > entityVec[j].score })
@@ -67,6 +80,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 			sim := store.CosineSimilarity(qEmb, e.Embedding)
 			if sim > 0.3 {
 				edgeVec = append(edgeVec, scored{e.UUID, sim})
+				edgByUUID[e.UUID] = e
 			}
 		}
 		sort.Slice(edgeVec, func(i, j int) bool { return edgeVec[i].score > edgeVec[j].score })
@@ -90,16 +104,6 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 	for rank, s := range edgeVec {
 		rrf["edg:"+s.uuid] += 1.0 / float64(k+rank+1)
-	}
-
-	// Build index maps for fast lookup.
-	entByUUID := map[string]store.Entity{}
-	for _, e := range entFTS {
-		entByUUID[e.UUID] = e
-	}
-	edgByUUID := map[string]store.Edge{}
-	for _, e := range edgeFTS {
-		edgByUUID[e.UUID] = e
 	}
 
 	type rfentry struct {

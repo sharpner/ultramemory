@@ -37,9 +37,20 @@ func (d *DB) UpsertEdge(ctx context.Context, e Edge) error {
 	}
 
 	if existing != "" {
-		_, err = d.sql.ExecContext(ctx,
+		if _, err = d.sql.ExecContext(ctx,
 			`UPDATE edges SET fact = ?, embedding = ? WHERE uuid = ?`,
 			e.Fact, embBlob, existing,
+		); err != nil {
+			return err
+		}
+		// Keep FTS in sync with updated fact.
+		if _, err := d.sql.ExecContext(ctx,
+			`DELETE FROM edges_fts WHERE uuid = ?`, existing,
+		); err != nil {
+			return err
+		}
+		_, err = d.sql.ExecContext(ctx,
+			`INSERT INTO edges_fts (uuid, fact) VALUES (?, ?)`, existing, e.Fact,
 		)
 		return err
 	}
