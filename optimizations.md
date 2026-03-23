@@ -498,14 +498,19 @@ Code:
 Duration: 17m23s. **Temporal Decay allein: neutral/-0.4% auf v18.db** (keine Community Reports vorhanden).
 Frische Ingestion (v26-fresh.db) mit Community Reports läuft parallel → messung von vollem v26-Effekt ausstehend.
 
-### Iteration 27 — v27: Entity Resolution in Pipeline (Graphiti §4.1) (2026-03-23)
+### Iteration 27 — v27: Entity Resolution + MAGMA Episode Backfill (Graphiti §4.1 + SYNAPSE §3.1) (2026-03-23)
 Code:
-- Entity Resolution nach Community Detection in bench/locomo.go eingefügt
-- Merger von Duplikaten via embedding cosine (threshold 0.92) + token Jaccard
-- Union-Find Clustering, Canonical = Entity mit meisten Kanten
+- **Entity Resolution** in bench/locomo.go Pipeline (nach Community Detection)
+  - JEDOCH: 0 Clusters für LoCoMo! gemma3:4b normalisiert Namen bereits bei Extraktion → keine Duplikate
+  - False-Positive-Bug gefixed: tokenJaccard < 0.5 Guard verhindert Mozart≈Bach Merges
+  - Entity-Embeddings ("A person named X") clustern alle Entities gleichen Typs → ungeeignet als alleiniges Merge-Signal
+- **MAGMA Episode Backfill** (Signal 3b): Top-5 MAGMA-Entities → ihre verknüpften Episodes via entity_episodes → 1.2× RRF-Boost
+  - Liefert Dialogo-Kontext für Multi-Hop wenn Edges allein nicht ausreichen
+  - store/episodes.go: EpisodesForEntities() — DISTINCT JOIN auf entity_episodes, sorted by source DESC
 
-**Erwartung**: Saubererer Graph → bessere MAGMA-Traversal für multi-hop Fragen.
-Frische Ingestion auf /tmp/v27-fresh.db ausstehend.
+**v27 Ergebnisse** ausstehend — qa-only auf v26-fresh.db mit neuem Binary.
+
+**v26-fresh Ergebnisse** ausstehend (Fresh Ingestion + Community Reports + Temporal Decay, läuft).
 
 
 
