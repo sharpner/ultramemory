@@ -69,30 +69,19 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		epByUUID[e.UUID] = e
 	}
 
-	var entityVec, edgeVec, episodeVec []scored
+	// Entity vector search is disabled: entities are not rendered in context output
+	// (formatContext three-pass skips entity type), so entity RRF scores have no effect.
+	// Entity embeddings still serve MAGMA seeding via FTS entity hits.
+	//
+	// Edge vector search is disabled (v23 finding): introduces semantic near-misses
+	// (grandfather≈grandmother) that introduce noise for adversarial questions.
+	//
+	// Only episode vector search is live — episodes contain raw dialogue context.
+	var edgeVec []scored // kept for completeness; never populated
+	_ = edgeVec
 
+	var episodeVec []scored
 	if len(qEmb) > 0 {
-		entities, _ := db.AllEntitiesWithEmbeddings(ctx, groupID)
-		for _, e := range entities {
-			sim := store.CosineSimilarity(qEmb, e.Embedding)
-			// Threshold 0.3: entity vectors become MAGMA seeds. Higher threshold (0.5)
-			// reduces MAGMA seeds → less graph traversal → worse adversarial (v22 test).
-			if sim > 0.3 {
-				entityVec = append(entityVec, scored{e.UUID, sim})
-				entByUUID[e.UUID] = e
-			}
-		}
-		sort.Slice(entityVec, func(i, j int) bool { return entityVec[i].score > entityVec[j].score })
-		if len(entityVec) > limit*2 {
-			entityVec = entityVec[:limit*2]
-		}
-
-		// v23 test: edge vector search disabled. v11 had no edge vector search → 52.7% adversarial.
-		// v19 reintroduced it at 0.3 threshold → adversarial dropped to 43.4%. Hypothesis: edge
-		// vector search introduces semantic near-misses (grandfather≈grandmother) that hurt
-		// adversarial "unknown" questions. Removing entirely to confirm causation.
-		// edgeVec remains nil — falls back to FTS-only for edge retrieval.
-
 		episodes, _ := db.AllEpisodesWithEmbeddings(ctx, groupID)
 		for _, e := range episodes {
 			sim := store.CosineSimilarity(qEmb, e.Embedding)
@@ -173,13 +162,9 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 
 	// Signal 2: Vector similarity ranks.
-	for rank, s := range entityVec {
-		rrf["ent:"+s.uuid] += 1.0 / float64(k+rank+1)
-	}
-	for rank, s := range edgeVec {
-		rrf["edg:"+s.uuid] += 1.0 / float64(k+rank+1)
-	}
-	// Episode vector search boosted 1.5× (same as FTS episodes).
+	// Entity vector search disabled (entities skipped in output — inaktiv nach Entity-Slot-Fix).
+	// Edge vector search disabled (v23 finding: semantic near-misses introduce noise).
+	// Only episode vector search is live.
 	for rank, s := range episodeVec {
 		rrf["ep:"+s.uuid] += 1.5 / float64(k+rank+1)
 	}
