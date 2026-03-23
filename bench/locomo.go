@@ -124,7 +124,8 @@ type qaScore struct {
 // Set limit > 0 to evaluate only the first N conversations.
 // When baseline is true, only raw episode FTS is used (no graph extraction).
 // qaAnswerer overrides the QA answering model when set (extraction always uses client).
-func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, qaAnswerer llm.Answerer, resolveThreshold float64, limit int, baseline bool) (*Result, error) {
+// When qaOnly is true, ingestion is skipped — DB must already be populated (for rerunning QA with a different model).
+func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, qaAnswerer llm.Answerer, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
 	conversations, err := parseLoCoMo(dataPath)
 	if err != nil {
 		return nil, err
@@ -159,46 +160,49 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 			"sample", conv.SampleID,
 			"sessions", len(conv.Sessions),
 			"qa", len(conv.QA),
+			"qa_only", qaOnly,
 		)
 
-		// Ingest all sessions.
-		for _, sess := range conv.Sessions {
-			text := formatSession(sess)
-			chunks := chunkText(text, chunkSize)
-			for _, chunk := range chunks {
-				if len(strings.TrimSpace(chunk)) < 50 {
-					continue
-				}
-				source := fmt.Sprintf("locomo/%s/session_%d", conv.SampleID, sess.Number)
-				if baseline {
-					if err := db.UpsertEpisode(ctx, store.Episode{
-						UUID:    uuid.New().String(),
-						Content: chunk,
-						GroupID: groupID,
-						Source:  source,
-					}); err != nil {
-						slog.Warn("episode insert failed", "err", err)
+		if !qaOnly {
+			// Ingest all sessions.
+			for _, sess := range conv.Sessions {
+				text := formatSession(sess)
+				chunks := chunkText(text, chunkSize)
+				for _, chunk := range chunks {
+					if len(strings.TrimSpace(chunk)) < 50 {
+						continue
 					}
-				} else {
-					ext := graph.New(db, client, resolveThreshold)
-					if err := ext.Process(ctx, chunk, source, groupID); err != nil {
-						slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
+					source := fmt.Sprintf("locomo/%s/session_%d", conv.SampleID, sess.Number)
+					if baseline {
+						if err := db.UpsertEpisode(ctx, store.Episode{
+							UUID:    uuid.New().String(),
+							Content: chunk,
+							GroupID: groupID,
+							Source:  source,
+						}); err != nil {
+							slog.Warn("episode insert failed", "err", err)
+						}
+					} else {
+						ext := graph.New(db, client, resolveThreshold)
+						if err := ext.Process(ctx, chunk, source, groupID); err != nil {
+							slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
+						}
 					}
 				}
 			}
-		}
 
-		// Run community detection after ingestion (Louvain algorithm).
-		if !baseline {
-			result, err := db.DetectCommunities(ctx, groupID, 1.0)
-			if err != nil {
-				slog.Warn("community detection failed", "err", err)
-			} else {
-				slog.Info("communities detected",
-					"conv", conv.SampleID,
-					"communities", result.Communities,
-					"entities", result.Entities,
-				)
+			// Run community detection after ingestion (Louvain algorithm).
+			if !baseline {
+				result, err := db.DetectCommunities(ctx, groupID, 1.0)
+				if err != nil {
+					slog.Warn("community detection failed", "err", err)
+				} else {
+					slog.Info("communities detected",
+						"conv", conv.SampleID,
+						"communities", result.Communities,
+						"entities", result.Entities,
+					)
+				}
 			}
 		}
 

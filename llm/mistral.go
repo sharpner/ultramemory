@@ -33,9 +33,11 @@ func NewMistral(apiKey, model string) *MistralClient {
 }
 
 // Answer sends a question to the Mistral API and returns the response.
+// Default max_tokens is 32 — Mistral-small is verbose and tokenF1 rewards brevity.
+// Unlike gemma3:4b, it does not self-terminate after a short answer.
 func (m *MistralClient) Answer(ctx context.Context, system, user string, maxTokens int) (string, error) {
 	if maxTokens <= 0 {
-		maxTokens = 128
+		maxTokens = 32
 	}
 
 	body := map[string]any{

@@ -254,14 +254,93 @@ Also implemented:
 - Union-Find clustering, canonical selection by edge count
 - 5 unit tests (no Ollama required)
 
-### Summary — Best Configuration (Iteration 11)
-**42.3% F1, 12.6% EM** with:
-- Triple-signal RRF (FTS + vector + MAGMA) with episode boost 1.5×
-- Fan effect + lateral inhibition in MAGMA (Synapse)
-- Episode vector search as 4th signal
+### Iteration 14 — v14: Edge Embeddings + Three-Pass Context + Line-Boundary Chunking (2026-03-23)
+Code: Edge facts now embedded at upsert time (dead signal fixed), three-pass context (edges→entity profiles→episodes), line-boundary chunking, initial "Would..." inference prompt.
+
+| Category | F1 | Delta vs v11 |
+|----------|-----|-------------|
+| single-hop | 33.6% | +6.8% |
+| multi-hop | 30.4% | -3.8% |
+| temporal | 13.9% | -9.4% |
+| open-domain | 55.7% | +5.4% |
+| adversarial | 46.1% | -6.6% |
+| **OVERALL** | **42.4%** | **+0.1%** |
+
+Duration: 13m15s. EM: 15.1%.
+Key insight: Edge embeddings + entity profiles strongly help single-hop (+6.8%) and open-domain (+5.4%). But adversarial/temporal regressed because "Would..." inference prompt caused model to reason instead of say "unknown". Net: tied with v11.
+
+### Iteration 15 — v15: Remove Inference Prompt (2026-03-23)
+Code: Reverted "Would..." inference prompt. Same code otherwise.
+
+| Category | F1 | Delta vs v14 | Delta vs v11 |
+|----------|-----|-------------|-------------|
+| single-hop | 36.2% | +2.6% | +9.4% |
+| multi-hop | 33.6% | +3.2% | -0.6% |
+| temporal | 10.7% | -3.2% | -12.6% |
+| open-domain | 55.9% | +0.2% | +5.6% |
+| adversarial | 44.5% | -1.6% | -8.2% |
+| **OVERALL** | **43.0%** | **+0.6%** | **+0.7%** |
+
+Duration: 12m1s. EM: 16.1%. **New overall best.**
+Key insight: Removing inference prompt recovered most categories. Temporal still regressed vs v11 — temporal has only 13 questions (high variance). adversarial still below v11 — entity profiles provide false signals for "unknown" questions.
+
+### Iteration 16 — v16: MAGMA BeamWidth 10→20 + Description-Only Entity Profiles (2026-03-23)
+Code: MAGMA beam width doubled (more exploration for multi-hop), entity profiles only shown when description exists (no bare "Person" noise).
+
+| Category | F1 | Delta vs v15 | Delta vs v11 |
+|----------|-----|-------------|-------------|
+| single-hop | 36.1% | -0.1% | +9.3% |
+| multi-hop | 32.6% | -1.0% | -1.6% |
+| temporal | 12.5% | +1.8% | -10.8% |
+| open-domain | 57.5% | +1.6% | +7.2% |
+| adversarial | 42.3% | -2.2% | -10.4% |
+| **OVERALL** | **42.9%** | **-0.1%** | **+0.6%** |
+
+Duration: 12m30s. EM: 17.6% (**new EM best**).
+Key insight: Beam width 20 improves open-domain and EM but costs adversarial. adversarial regression vs v11 (-10.4%) is a structural issue: entity profiles in context cause model to hallucinate answers for "unknown" questions.
+
+**Evaluation note (Issue #23)**: LLM-as-judge scores (e.g. 86% with GPT-4o-mini) are NOT comparable to our tokenF1. Deliberate hallucinations score 61.84% with LLM-judge. Our tokenF1 is stricter and more honest. See https://github.com/snap-research/locomo/issues/23
+
+### Summary — Best Configuration (v15/v16)
+**43.0% F1, 16.1% EM (v15)** / **42.9% F1, 17.6% EM (v16)** with:
+- Quadruple-signal RRF (FTS + vector + MAGMA + episode vector) with episode boost 1.5×
+- Edge fact embeddings (v14+) — edge vector search now live
+- Three-pass context: edges → entity profiles (description only) → episodes
+- Line-boundary chunking (v14+) — dialogue turns stay intact
+- Fan effect + lateral inhibition in MAGMA (Synapse §3.1)
+- MAGMA BeamWidth=20 (v16+)
 - Relative score cutoff (15% of top hit)
 - num_ctx=8192 for both extraction and QA
 - search limit=25, episode truncation 1500 chars
 - Facts-first context ordering (edges before episodes)
 - Louvain communities with 0.15 edge-only boost
 - Entity embedding with sentence templates (v13+)
+
+### Iteration 17 — Mistral-small-2506 QA-Only (2026-03-23)
+Code: Mistral-small-2506 via API for QA answering only, gemma3:4b extraction unchanged.
+Used existing v16 DB (-qa-only flag). max_tokens=32.
+
+| Category | gemma3:4b | mistral-small-2506 | Delta |
+|----------|-----------|-------------------|-------|
+| single-hop | 36.1% | 36.0% | -0.1% |
+| multi-hop | 32.6% | 20.2% | -12.4% |
+| temporal | 12.5% | 2.2% | -10.3% |
+| open-domain | 57.5% | 56.5% | -1.0% |
+| adversarial | 42.3% | 9.3% | -33.0% |
+| **OVERALL** | **42.9%** | **31.8%** | **-11.1%** |
+
+**Key finding: gemma3:4b is BETTER than Mistral-small-2506 for tokenF1.**
+Reason: gemma3:4b naturally terminates after short answers. Mistral elaborates even at 32 tokens.
+Adversarial insight: adversarial questions are NOT "unknown"-type — they're tricksy entity-attribution
+questions ("What was grandpa's gift to Caroline?" when grandma gave the necklace). Mistral mixes
+entities more often. gemma3:4b's directness actually works in its favor here.
+
+**Conclusion**: Our tokenF1 scoring is well-matched to gemma3:4b. Switching to Mistral for QA
+would require LLM-as-judge scoring to show improvement. See Issue #23 for why LLM-judge is also
+problematic (61.84% score for deliberate hallucinations).
+
+### Next steps
+- Adversarial regression vs v11: entity profiles cause entity confusion (grandma A vs grandma B)
+  → Consider filtering entity profiles or adding source attribution
+- Temporal decay (SYNAPSE §3.2): weight edges by session recency
+- Consider reverting entity profiles entirely to recover adversarial

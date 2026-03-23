@@ -129,14 +129,17 @@ func main() {
 		limit    := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
 		baseline := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
 		qaModel  := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
+		qaOnly   := fs.Bool("qa-only", false, "skip ingestion, run QA on existing DB (use with -qa-model for fast model swapping)")
 		_ = fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
-			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] <locomo10.json>")
+			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] [-qa-only] <locomo10.json>")
 		}
-		must(client.Ping(ctx), "ping ollama")
-		fmt.Fprintln(os.Stderr, "Warming up model…")
-		if err := client.Warmup(ctx); err != nil {
-			slog.Warn("warmup failed", "err", err)
+		if !*qaOnly {
+			must(client.Ping(ctx), "ping ollama")
+			fmt.Fprintln(os.Stderr, "Warming up model…")
+			if err := client.Warmup(ctx); err != nil {
+				slog.Warn("warmup failed", "err", err)
+			}
 		}
 
 		var qaAnswerer llm.Answerer
@@ -149,7 +152,7 @@ func main() {
 			slog.Info("QA answerer", "model", *qaModel, "provider", "mistral")
 		}
 
-		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, resolveThreshold, *limit, *baseline)
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, resolveThreshold, *limit, *baseline, *qaOnly)
 		must(err, "bench")
 		bench.PrintResult(result)
 
