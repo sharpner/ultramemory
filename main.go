@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sharpner/ultramemory/bench"
 	"github.com/sharpner/ultramemory/graph"
 	"github.com/sharpner/ultramemory/ingest"
 	"github.com/sharpner/ultramemory/llm"
@@ -122,6 +123,64 @@ func main() {
 		results, err := graph.Search(ctx, db, client, query, groupID, 10)
 		must(err, "search")
 		printSearch(results, query, *format, *maxTokens)
+
+	case "bench":
+		fs := flag.NewFlagSet("bench", flag.ExitOnError)
+		limit     := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
+		baseline  := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
+		qaModel   := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
+		qaOnly    := fs.Bool("qa-only", false, "skip ingestion, run QA on existing DB (use with -qa-model for fast model swapping)")
+		judgeModel := fs.String("judge", "", "LLM judge model for semantic evaluation: 'mistral-small-2506' (requires MISTRAL_API_KEY)")
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] [-qa-only] [-judge MODEL] <locomo10.json>")
+		}
+		if !*qaOnly {
+			must(client.Ping(ctx), "ping ollama")
+			fmt.Fprintln(os.Stderr, "Warming up model…")
+			if err := client.Warmup(ctx); err != nil {
+				slog.Warn("warmup failed", "err", err)
+			}
+		}
+
+		mistralKey := os.Getenv("MISTRAL_API_KEY")
+
+		var qaAnswerer llm.Answerer
+		if *qaModel != "" {
+			if mistralKey == "" {
+				fatalf("MISTRAL_API_KEY not set — required for -qa-model %s", *qaModel)
+			}
+			qaAnswerer = llm.NewMistral(mistralKey, *qaModel)
+			slog.Info("QA answerer", "model", *qaModel, "provider", "mistral")
+		}
+
+		var judge bench.Judge
+		if *judgeModel != "" {
+			if mistralKey == "" {
+				fatalf("MISTRAL_API_KEY not set — required for -judge %s", *judgeModel)
+			}
+			judge = llm.NewMistral(mistralKey, *judgeModel)
+			slog.Info("LLM judge", "model", *judgeModel, "provider", "mistral")
+		}
+
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, judge, resolveThreshold, *limit, *baseline, *qaOnly)
+		must(err, "bench")
+		bench.PrintResult(result)
+
+	case "resolve":
+		fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+		dryRun    := fs.Bool("dry-run", false, "print planned merges without writing")
+		threshold := fs.Float64("threshold", 0.85, "cosine similarity threshold (0–1]")
+		_ = fs.Parse(os.Args[2:])
+		if *threshold <= 0 || *threshold > 1 {
+			fatalf("--threshold must be in (0, 1], got %g", *threshold)
+		}
+		result, err := db.ResolveEntities(ctx, groupID, store.ResolveConfig{
+			Threshold: *threshold,
+			DryRun:    *dryRun,
+		})
+		must(err, "resolve")
+		printResolveResult(result, *dryRun)
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
@@ -296,22 +355,37 @@ func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 	}
 }
 
+func printResolveResult(r store.ResolveResult, dryRun bool) {
+	mode := ""
+	if dryRun {
+		mode = " (dry-run)"
+	}
+	fmt.Printf("Entity resolution%s:\n", mode)
+	fmt.Printf("  clusters found    : %d\n", r.ClustersFound)
+	fmt.Printf("  entities merged   : %d\n", r.EntitiesMerged)
+	fmt.Printf("  edges retargeted  : %d\n", r.EdgesRetargeted)
+	fmt.Printf("  episodes relinked : %d\n", r.EpisodesRelinked)
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, `memory-local — local knowledge graph (SQLite + Ollama)
 
 Commands:
-  run    <path>   ingest directory + start worker (all-in-one)
-  ingest <path>   queue all text files for processing
-  worker          process queued jobs (blocking)
-  search <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
-  status          show queue and graph statistics
+  run     <path>   ingest directory + start worker (all-in-one)
+  ingest  <path>   queue all text files for processing
+  worker           process queued jobs (blocking)
+  search  <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
+  resolve          merge near-duplicate entities (flags: -dry-run, -threshold 0.85)
+  bench   <json>   evaluate against LoCoMo benchmark (flags: -limit N, -baseline)
+  status           show queue and graph statistics
 
 Environment:
-  MEMORY_DB           path to SQLite file  (default: memory-local.db)
-  MEMORY_OLLAMA       Ollama base URL      (default: http://localhost:11434)
-  MEMORY_MODEL        extraction model     (default: gemma3:4b)
-  MEMORY_EMBED_MODEL  embedding model      (default: nomic-embed-text)
-  MEMORY_GROUP        namespace/group      (default: default)`)
+  MEMORY_DB                  path to SQLite file  (default: memory-local.db)
+  MEMORY_OLLAMA              Ollama base URL      (default: http://localhost:11434)
+  MEMORY_MODEL               extraction model     (default: gemma3:4b)
+  MEMORY_EMBED_MODEL         embedding model      (default: nomic-embed-text)
+  MEMORY_GROUP               namespace/group      (default: default)
+  MEMORY_RESOLVE_THRESHOLD   resolve similarity   (default: 0.92)`)
 }
 
 func envOr(key, fallback string) string {

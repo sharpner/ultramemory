@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -73,6 +74,101 @@ func (d *DB) FirstEdgeSource(ctx context.Context, edgeUUID string) string {
 		edgeUUID,
 	).Scan(&src) //nolint:errcheck
 	return src
+}
+
+// SearchEpisodesFTS performs fulltext search over episode content.
+func (d *DB) SearchEpisodesFTS(ctx context.Context, query, groupID string, limit int) ([]Episode, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT e.uuid, e.content, e.source, e.embedding
+		FROM episodes_fts f
+		JOIN episodes e ON e.uuid = f.uuid
+		WHERE episodes_fts MATCH ? AND e.group_id = ?
+		ORDER BY rank
+		LIMIT ?`,
+		fts5Query(query), groupID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Episode
+	for rows.Next() {
+		var ep Episode
+		var blob []byte
+		if err := rows.Scan(&ep.UUID, &ep.Content, &ep.Source, &blob); err != nil {
+			return nil, err
+		}
+		ep.GroupID = groupID
+		ep.Embedding = DecodeEmbedding(blob)
+		out = append(out, ep)
+	}
+	return out, rows.Err()
+}
+
+// AllEpisodesWithEmbeddings loads all episodes with embeddings for vector search.
+func (d *DB) AllEpisodesWithEmbeddings(ctx context.Context, groupID string) ([]Episode, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT uuid, content, source, embedding
+		 FROM episodes
+		 WHERE group_id = ? AND embedding IS NOT NULL`,
+		groupID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Episode
+	for rows.Next() {
+		var ep Episode
+		var blob []byte
+		if err := rows.Scan(&ep.UUID, &ep.Content, &ep.Source, &blob); err != nil {
+			return nil, err
+		}
+		ep.GroupID = groupID
+		ep.Embedding = DecodeEmbedding(blob)
+		out = append(out, ep)
+	}
+	return out, rows.Err()
+}
+
+// EpisodesForEntities returns episodes linked to any of the given entity UUIDs,
+// ordered by recency (latest source first). Used for MAGMA episode backfill.
+func (d *DB) EpisodesForEntities(ctx context.Context, entityUUIDs []string, groupID string, limit int) ([]Episode, error) {
+	if len(entityUUIDs) == 0 {
+		return nil, nil
+	}
+	ph := strings.Repeat("?,", len(entityUUIDs)-1) + "?"
+	args := make([]any, 0, len(entityUUIDs)+2)
+	for _, u := range entityUUIDs {
+		args = append(args, u)
+	}
+	args = append(args, groupID, limit)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT DISTINCT e.uuid, e.content, e.source, e.embedding
+		FROM episodes e
+		JOIN entity_episodes ee ON ee.episode_uuid = e.uuid
+		WHERE ee.entity_uuid IN (`+ph+`) AND e.group_id = ?
+		ORDER BY e.created_at DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Episode
+	for rows.Next() {
+		var ep Episode
+		var blob []byte
+		if err := rows.Scan(&ep.UUID, &ep.Content, &ep.Source, &blob); err != nil {
+			return nil, err
+		}
+		ep.GroupID = groupID
+		ep.Embedding = DecodeEmbedding(blob)
+		out = append(out, ep)
+	}
+	return out, rows.Err()
 }
 
 // CountEpisodes returns the total episode count for a group.

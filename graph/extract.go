@@ -108,13 +108,19 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 	// ── 5. Resolve entities: embed → FTS dedup → upsert → link ──────────────
 	entityUUIDs := make([]string, len(extracted.Entities))
 	for i, ent := range extracted.Entities {
-		vec, err := e.llm.Embed(ctx, ent.Name+" ("+ent.EntityType+")")
+		// Embed the LLM-generated description — richer signal than bare names.
+		// Falls back to sentence template if description is empty.
+		embInput := ent.Description
+		if embInput == "" {
+			embInput = entityEmbedText(ent.Name, ent.EntityType)
+		}
+		vec, err := e.llm.Embed(ctx, embInput)
 		if err != nil {
 			slog.Debug("embed entity failed", "name", ent.Name, "err", err)
 		}
 
 		e.muEntity.Lock()
-		canonical, err := e.resolveOrCreate(ctx, ent.Name, ent.EntityType, groupID, vec)
+		canonical, err := e.resolveOrCreate(ctx, ent.Name, ent.EntityType, groupID, vec, ent.Description)
 		e.muEntity.Unlock()
 		if err != nil {
 			return fmt.Errorf("resolve entity %q: %w", ent.Name, err)
@@ -126,13 +132,20 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		}
 	}
 
-	// ── 6. Store edges ────────────────────────────────────────────────────────
+	// ── 6. Store edges (with fact embeddings for vector search) ──────────────
 	for _, ex := range edges.Edges {
 		if ex.SourceEntityID < 0 || ex.SourceEntityID >= len(entityUUIDs) {
 			continue
 		}
 		if ex.TargetEntityID < 0 || ex.TargetEntityID >= len(entityUUIDs) {
 			continue
+		}
+		var edgeEmb []float32
+		if ex.Fact != "" {
+			edgeEmb, err = e.llm.Embed(ctx, ex.Fact)
+			if err != nil {
+				slog.Debug("embed edge fact failed", "fact", ex.Fact, "err", err)
+			}
 		}
 		if err := e.db.UpsertEdge(ctx, store.Edge{
 			UUID:       uuid.New().String(),
@@ -144,6 +157,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 			ValidAt:    ex.ValidAt,
 			InvalidAt:  ex.InvalidAt,
 			Episodes:   fmt.Sprintf(`["%s"]`, epUUID),
+			Embedding:  edgeEmb,
 		}); err != nil {
 			return fmt.Errorf("upsert edge: %w", err)
 		}
@@ -164,7 +178,7 @@ func (e *Extractor) Wait() {
 
 // resolveOrCreate looks up an existing entity via FTS + cosine similarity, or
 // inserts a new one. Caller must hold muEntity.
-func (e *Extractor) resolveOrCreate(ctx context.Context, name, entityType, groupID string, embedding []float32) (string, error) {
+func (e *Extractor) resolveOrCreate(ctx context.Context, name, entityType, groupID string, embedding []float32, description string) (string, error) {
 	if len(embedding) > 0 {
 		candidates, err := e.db.SearchEntitiesFTS(ctx, name, groupID, 5)
 		if err != nil {
@@ -180,11 +194,12 @@ func (e *Extractor) resolveOrCreate(ctx context.Context, name, entityType, group
 		}
 	}
 	return e.db.UpsertEntity(ctx, store.Entity{
-		UUID:       uuid.New().String(),
-		Name:       name,
-		EntityType: entityType,
-		GroupID:    groupID,
-		Embedding:  embedding,
+		UUID:        uuid.New().String(),
+		Name:        name,
+		EntityType:  entityType,
+		GroupID:     groupID,
+		Embedding:   embedding,
+		Description: description,
 	})
 }
 
@@ -200,6 +215,26 @@ func (e *Extractor) embedEpisode(ctx context.Context, uuid, content string) {
 		store.EncodeEmbedding(vec), uuid,
 	); err != nil {
 		slog.Debug("store episode embedding failed", "err", err)
+	}
+}
+
+// entityEmbedText generates a sentence for embedding an entity name.
+// nomic-embed-text returns identical vectors for isolated proper nouns;
+// wrapping in a sentence gives the model enough context to differentiate.
+func entityEmbedText(name, entityType string) string {
+	switch entityType {
+	case "Person":
+		return "A person named " + name
+	case "Organization":
+		return "An organization called " + name
+	case "Place":
+		return "A place called " + name
+	case "Product":
+		return "A product called " + name
+	case "Event":
+		return "An event called " + name
+	default:
+		return "A concept called " + name
 	}
 }
 

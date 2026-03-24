@@ -88,7 +88,7 @@ func (d *DB) CountEdges(ctx context.Context, groupID string) (int, error) {
 // SearchEdgesFTS performs fulltext search over edge facts.
 func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit int) ([]Edge, error) {
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT e.uuid, e.source_uuid, e.target_uuid, e.name, e.fact, e.embedding
+		SELECT e.uuid, e.source_uuid, e.target_uuid, e.name, e.fact, e.valid_at, e.embedding
 		FROM edges_fts f
 		JOIN edges e ON e.uuid = f.uuid
 		WHERE edges_fts MATCH ? AND e.group_id = ?
@@ -105,7 +105,7 @@ func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit in
 	for rows.Next() {
 		var e Edge
 		var blob []byte
-		if err := rows.Scan(&e.UUID, &e.SourceUUID, &e.TargetUUID, &e.Name, &e.Fact, &blob); err != nil {
+		if err := rows.Scan(&e.UUID, &e.SourceUUID, &e.TargetUUID, &e.Name, &e.Fact, &e.ValidAt, &blob); err != nil {
 			return nil, err
 		}
 		e.GroupID = groupID
@@ -118,7 +118,7 @@ func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit in
 // AllEdgesWithEmbeddings loads all edges with embeddings for vector search.
 func (d *DB) AllEdgesWithEmbeddings(ctx context.Context, groupID string) ([]Edge, error) {
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT uuid, source_uuid, target_uuid, name, fact, embedding
+		`SELECT uuid, source_uuid, target_uuid, name, fact, valid_at, embedding
 		 FROM edges
 		 WHERE group_id = ? AND embedding IS NOT NULL`,
 		groupID,
@@ -132,7 +132,7 @@ func (d *DB) AllEdgesWithEmbeddings(ctx context.Context, groupID string) ([]Edge
 	for rows.Next() {
 		var e Edge
 		var blob []byte
-		if err := rows.Scan(&e.UUID, &e.SourceUUID, &e.TargetUUID, &e.Name, &e.Fact, &blob); err != nil {
+		if err := rows.Scan(&e.UUID, &e.SourceUUID, &e.TargetUUID, &e.Name, &e.Fact, &e.ValidAt, &blob); err != nil {
 			return nil, err
 		}
 		e.GroupID = groupID

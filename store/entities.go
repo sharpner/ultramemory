@@ -8,11 +8,12 @@ import (
 
 // Entity is a named node in the knowledge graph.
 type Entity struct {
-	UUID       string
-	Name       string
-	EntityType string
-	GroupID    string
-	Embedding  []float32
+	UUID        string
+	Name        string
+	EntityType  string
+	GroupID     string
+	Embedding   []float32
+	Description string
 }
 
 // UpsertEntity inserts or merges an entity by name+group (case-insensitive).
@@ -31,8 +32,8 @@ func (d *DB) UpsertEntity(ctx context.Context, e Entity) (string, error) {
 	if existing != "" {
 		if len(e.Embedding) > 0 {
 			_, err = d.sql.ExecContext(ctx,
-				`UPDATE entities SET embedding = ? WHERE uuid = ?`,
-				EncodeEmbedding(e.Embedding), existing,
+				`UPDATE entities SET embedding = ?, description = ? WHERE uuid = ?`,
+				EncodeEmbedding(e.Embedding), e.Description, existing,
 			)
 		}
 		return existing, err
@@ -43,9 +44,9 @@ func (d *DB) UpsertEntity(ctx context.Context, e Entity) (string, error) {
 		embBlob = EncodeEmbedding(e.Embedding)
 	}
 	_, err = d.sql.ExecContext(ctx, `
-		INSERT INTO entities (uuid, name, entity_type, group_id, embedding)
-		VALUES (?, ?, ?, ?, ?)`,
-		e.UUID, e.Name, e.EntityType, e.GroupID, embBlob,
+		INSERT INTO entities (uuid, name, entity_type, group_id, embedding, description)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		e.UUID, e.Name, e.EntityType, e.GroupID, embBlob, e.Description,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert entity: %w", err)
@@ -82,7 +83,7 @@ func (d *DB) CountEntities(ctx context.Context, groupID string) (int, error) {
 // AllEntitiesWithEmbeddings loads all entities that have embeddings for vector search.
 func (d *DB) AllEntitiesWithEmbeddings(ctx context.Context, groupID string) ([]Entity, error) {
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT uuid, name, entity_type, embedding
+		`SELECT uuid, name, entity_type, embedding, description
 		 FROM entities
 		 WHERE group_id = ? AND embedding IS NOT NULL`,
 		groupID,
@@ -96,7 +97,44 @@ func (d *DB) AllEntitiesWithEmbeddings(ctx context.Context, groupID string) ([]E
 	for rows.Next() {
 		var e Entity
 		var blob []byte
-		if err := rows.Scan(&e.UUID, &e.Name, &e.EntityType, &blob); err != nil {
+		if err := rows.Scan(&e.UUID, &e.Name, &e.EntityType, &blob, &e.Description); err != nil {
+			return nil, err
+		}
+		e.GroupID = groupID
+		e.Embedding = DecodeEmbedding(blob)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// EntitiesForEpisodes returns entities linked to any of the given episode UUIDs
+// via the entity_episodes join table. Used for episode→entity MAGMA seed expansion:
+// FTS episode hits often link to entities not directly matched by entity FTS.
+func (d *DB) EntitiesForEpisodes(ctx context.Context, episodeUUIDs []string, groupID string) ([]Entity, error) {
+	if len(episodeUUIDs) == 0 {
+		return nil, nil
+	}
+	ph := placeholders(len(episodeUUIDs))
+	args := make([]any, 0, len(episodeUUIDs)+1)
+	for _, u := range episodeUUIDs {
+		args = append(args, u)
+	}
+	args = append(args, groupID)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT DISTINCT e.uuid, e.name, e.entity_type, e.embedding, e.description
+		FROM entities e
+		JOIN entity_episodes ee ON ee.entity_uuid = e.uuid
+		WHERE ee.episode_uuid IN (`+ph+`) AND e.group_id = ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Entity
+	for rows.Next() {
+		var e Entity
+		var blob []byte
+		if err := rows.Scan(&e.UUID, &e.Name, &e.EntityType, &blob, &e.Description); err != nil {
 			return nil, err
 		}
 		e.GroupID = groupID
@@ -109,7 +147,7 @@ func (d *DB) AllEntitiesWithEmbeddings(ctx context.Context, groupID string) ([]E
 // SearchEntitiesFTS performs fulltext search on entity names.
 func (d *DB) SearchEntitiesFTS(ctx context.Context, query, groupID string, limit int) ([]Entity, error) {
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT e.uuid, e.name, e.entity_type, e.embedding
+		SELECT e.uuid, e.name, e.entity_type, e.embedding, e.description
 		FROM entities_fts f
 		JOIN entities e ON e.uuid = f.uuid
 		WHERE entities_fts MATCH ? AND e.group_id = ?
@@ -126,7 +164,7 @@ func (d *DB) SearchEntitiesFTS(ctx context.Context, query, groupID string, limit
 	for rows.Next() {
 		var e Entity
 		var blob []byte
-		if err := rows.Scan(&e.UUID, &e.Name, &e.EntityType, &blob); err != nil {
+		if err := rows.Scan(&e.UUID, &e.Name, &e.EntityType, &blob, &e.Description); err != nil {
 			return nil, err
 		}
 		e.GroupID = groupID

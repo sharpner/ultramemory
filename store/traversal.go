@@ -16,8 +16,11 @@ type NeighborEntity struct {
 	Embedding  []float32 // entity embedding for semantic affinity scoring
 }
 
-// GetNeighbors returns all entities bidirectionally connected to uuid via an edge,
-// including their embeddings for MAGMA semantic affinity computation.
+// GetNeighbors returns all entities connected to uuid, including:
+//   - Direct edge neighbors (bidirectional)
+//   - Episodic co-occurrence: entities extracted from the same episode (Synapse §3.1)
+//
+// Episodic bridging enables temporal/narrative chain traversal that direct edges miss.
 func (d *DB) GetNeighbors(ctx context.Context, uuid, groupID string) ([]NeighborEntity, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT e.uuid, e.name, e.entity_type, e.group_id, ed.fact, ed.name, e.embedding
@@ -28,7 +31,8 @@ func (d *DB) GetNeighbors(ctx context.Context, uuid, groupID string) ([]Neighbor
 		SELECT e.uuid, e.name, e.entity_type, e.group_id, ed.fact, ed.name, e.embedding
 		FROM edges ed
 		JOIN entities e ON e.uuid = ed.source_uuid
-		WHERE ed.target_uuid = ? AND ed.group_id = ?`,
+		WHERE ed.target_uuid = ? AND ed.group_id = ?
+`,
 		uuid, groupID, uuid, groupID,
 	)
 	if err != nil {

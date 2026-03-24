@@ -16,6 +16,9 @@ func noopClient(t *testing.T) *llm.Client {
 	return newMockClient(t, `{"extracted_entities":[]}`, `{"edges":[]}`)
 }
 
+// TestSearch_FTSEntityHit verifies that an entity FTS hit seeds MAGMA and
+// surfaces the entity's connected edge (not the entity itself — entities are
+// not rendered in context output, so they are skipped in the results list).
 func TestSearch_FTSEntityHit(t *testing.T) {
 	db := openExtractTestDB(t)
 	ctx := context.Background()
@@ -25,19 +28,35 @@ func TestSearch_FTSEntityHit(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.UpsertEntity(ctx, store.Entity{
+		UUID: "ent2", Name: "Harker", EntityType: "person", GroupID: "g",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertEdge(ctx, store.Edge{
+		UUID: "edg1", SourceUUID: "ent1", TargetUUID: "ent2",
+		Name: "HAUNTS", Fact: "Dracula haunts Harker at Castle Dracula",
+		GroupID: "g", Episodes: "[]",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	results, err := Search(ctx, db, noopClient(t), "Dracula", "g", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) == 0 {
-		t.Fatal("expected at least 1 result, got 0")
+	found := false
+	for _, r := range results {
+		if r.Type == "edge" && strings.Contains(r.Body, "Dracula") {
+			found = true
+		}
+		// Entities must NOT appear in results — they provide no context output.
+		if r.Type == "entity" {
+			t.Errorf("entity result leaked into results: %v", r)
+		}
 	}
-	if results[0].Title != "Dracula" {
-		t.Errorf("expected title %q, got %q", "Dracula", results[0].Title)
-	}
-	if results[0].Type != "entity" {
-		t.Errorf("expected type %q, got %q", "entity", results[0].Type)
+	if !found {
+		t.Errorf("expected edge result containing Dracula, got %v", results)
 	}
 }
 
@@ -105,15 +124,20 @@ func TestSearch_SourcePopulated(t *testing.T) {
 	if len(results) == 0 {
 		t.Fatal("expected at least 1 result, got 0")
 	}
+	// Entity results are skipped (not rendered in context). The episode linked
+	// to the entity must appear with its source populated.
 	found := false
 	for _, r := range results {
-		if r.Title == "Mina Harker" && r.Source == "dracula/mina_diary.txt" {
+		if r.Type == "episode" && r.Source == "dracula/mina_diary.txt" {
 			found = true
 			break
 		}
+		if r.Type == "entity" {
+			t.Errorf("entity result leaked into results: %v", r)
+		}
 	}
 	if !found {
-		t.Errorf("expected result with source %q, got %v", "dracula/mina_diary.txt", results)
+		t.Errorf("expected episode result with source %q, got %v", "dracula/mina_diary.txt", results)
 	}
 }
 

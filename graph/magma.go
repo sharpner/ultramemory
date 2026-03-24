@@ -31,6 +31,8 @@ type MAGMAConfig struct {
 }
 
 // DefaultMAGMAConfig returns paper-aligned defaults (arxiv.org/abs/2601.03236).
+// BeamWidth=10 (paper default): v18 experiment showed BeamWidth=20 hurts adversarial
+// (-11%) more than it helps multi-hop (+4.4%). Restoring to paper default.
 func DefaultMAGMAConfig() MAGMAConfig {
 	return MAGMAConfig{
 		BeamWidth: 10,
@@ -110,6 +112,12 @@ func SpreadMAGMA(ctx context.Context, g GraphTraverser, seeds []ActivatedNode, q
 			if err != nil {
 				continue
 			}
+			// Synapse fan effect: dilute energy across outgoing edges.
+			// High-degree hubs spread less energy per edge than leaf nodes.
+			fanOut := float64(len(neighbors))
+			if fanOut < 1 {
+				fanOut = 1
+			}
 			for _, nb := range neighbors {
 				if visited[nb.UUID] {
 					continue
@@ -117,7 +125,8 @@ func SpreadMAGMA(ctx context.Context, g GraphTraverser, seeds []ActivatedNode, q
 				// Eq. 5: S(n_j|n_i,q) = exp(λ₁·φ + λ₂·sim)
 				t := computeTransition(nb.EdgeName, nb.Embedding, queryEmb, intent, cfg.Lambda1, cfg.Lambda2)
 				// Algorithm 1 line 10: score_v = score_u · γ + S  (additive)
-				newScore := candidate.score*cfg.Decay + t
+				// Fan effect applied: divide propagated score by out-degree.
+				newScore := (candidate.score*cfg.Decay + t) / fanOut
 				bestScores[nb.UUID] += newScore
 				if _, ok := nameMap[nb.UUID]; !ok {
 					nameMap[nb.UUID] = nb.Name
@@ -160,6 +169,12 @@ func SpreadMAGMA(ctx context.Context, g GraphTraverser, seeds []ActivatedNode, q
 	if len(out) > cfg.MaxNodes {
 		out = out[:cfg.MaxNodes]
 	}
+
+	// Synapse lateral inhibition: winner-take-all competition.
+	// Top-M nodes suppress weaker ones. Nodes that survive are
+	// structurally distinct winners, reducing context noise.
+	out = lateralInhibition(out, 7, 0.15)
+
 	return out, nil
 }
 
@@ -198,4 +213,38 @@ func applyMAGMADefaults(cfg *MAGMAConfig) {
 		cfg.Lambda2 = 0.5
 	}
 	// Threshold: 0 means "no output filtering" — do not fill with a default.
+}
+
+// lateralInhibition implements Synapse-style winner-take-all competition.
+// For each node, subtract beta × sum of (stronger_score - my_score) for the
+// top-M strongest competitors. Nodes whose adjusted score drops to ≤0 are removed.
+// The input must be sorted descending by Activation.
+func lateralInhibition(nodes []ActivatedNode, topM int, beta float64) []ActivatedNode {
+	if len(nodes) <= 1 {
+		return nodes
+	}
+	if topM > len(nodes) {
+		topM = len(nodes)
+	}
+
+	adjusted := make([]ActivatedNode, len(nodes))
+	copy(adjusted, nodes)
+
+	for i := range adjusted {
+		var inhibition float64
+		for k := 0; k < topM && k < i; k++ {
+			inhibition += nodes[k].Activation - nodes[i].Activation
+		}
+		adjusted[i].Activation = nodes[i].Activation - beta*inhibition
+	}
+
+	// Remove nodes suppressed to ≤ 0.
+	out := adjusted[:0]
+	for _, n := range adjusted {
+		if n.Activation <= 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }

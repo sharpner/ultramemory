@@ -19,7 +19,7 @@ import (
 
 const entitySystem = `Extract named entities from text. Output JSON only, no explanation.
 
-Output: {"extracted_entities": [{"name": "Full Name", "entity_type": "TYPE"}]}
+Output: {"extracted_entities": [{"name": "Full Name", "entity_type": "TYPE", "description": "one sentence describing this entity based on the text"}]}
 Types: Person, Organization, Place, Concept, Product, Event
 Empty: {"extracted_entities": []}
 
@@ -29,18 +29,19 @@ Rules:
 - Deduplicate: same entity mentioned twice = one entry
 - Canonical form: use nominative case. "Deutschen Bahn" → "Deutsche Bahn", "Hamburgs" → "Hamburg", "Müllers" → "Müller"
 - Title case: normalize ALL-CAPS names. "JONATHAN HARKER" → "Jonathan Harker", "COUNT DRACULA" → "Count Dracula"
+- Description: one sentence summarizing who/what the entity is based on the given text
 
 Example 1:
 Input: "Alice works at Google in Berlin since 2020."
-Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person"}, {"name": "Google", "entity_type": "Organization"}, {"name": "Berlin", "entity_type": "Place"}]}
+Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person", "description": "Alice is a professional who works at Google in Berlin"}, {"name": "Google", "entity_type": "Organization", "description": "Google is a technology company where Alice works"}, {"name": "Berlin", "entity_type": "Place", "description": "Berlin is the city where Alice works at Google"}]}
 
 Example 2 (German text, canonical forms):
 Input: "Der Chef der Deutschen Bahn sprach über Hamburgs Verkehrsprobleme."
-Output: {"extracted_entities": [{"name": "Deutsche Bahn", "entity_type": "Organization"}, {"name": "Hamburg", "entity_type": "Place"}]}`
+Output: {"extracted_entities": [{"name": "Deutsche Bahn", "entity_type": "Organization", "description": "Deutsche Bahn is a German railway company whose CEO discussed traffic problems"}, {"name": "Hamburg", "entity_type": "Place", "description": "Hamburg is a German city experiencing traffic problems"}]}`
 
 const edgeSystem = `Extract relationships between the listed entities. Output JSON only, no explanation.
 
-Output: {"edges": [{"relation_type": "VERB", "source_entity_id": 0, "target_entity_id": 1, "fact": "sentence", "valid_at": null, "invalid_at": null}]}
+Output: {"edges": [{"relation_type": "WORKS_AT", "source_entity_id": 0, "target_entity_id": 1, "fact": "Alice works at Google", "valid_at": "2020-01-01T00:00:00Z", "invalid_at": null}]}
 Empty: {"edges": []}
 
 Rules:
@@ -76,8 +77,9 @@ Output: {"edges": [{"relation_type": "LEADS_TO", "source_entity_id": 0, "target_
 
 // ExtractedEntity is one entity from the LLM response.
 type ExtractedEntity struct {
-	Name       string `json:"name"`
-	EntityType string `json:"entity_type"`
+	Name        string `json:"name"`
+	EntityType  string `json:"entity_type"`
+	Description string `json:"description"`
 }
 
 // ExtractedEntities is the entity extraction response.
@@ -108,6 +110,7 @@ type EmbeddingResponse struct {
 // ── Client ────────────────────────────────────────────────────────────────────
 
 var thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
+var thinkUnclosedRe = regexp.MustCompile(`(?s)<think>.*$`) // qwen3.5 sometimes omits </think>
 
 // sanitizeJSON removes control characters that gemma3:4b occasionally emits
 // inside JSON strings (e.g. literal pipe in escape sequences from markdown tables).
@@ -140,6 +143,57 @@ func sanitizeJSON(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+func cleanStructuredContent(s string) string {
+	s = thinkRe.ReplaceAllString(s, "")
+	s = thinkUnclosedRe.ReplaceAllString(s, "")
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```JSON")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+
+	value, ok := extractFirstJSONValue(s)
+	if ok {
+		return sanitizeJSON(value)
+	}
+
+	return sanitizeJSON(s)
+}
+
+func extractFirstJSONValue(s string) (string, bool) {
+	value, ok := decodeJSONValue(s)
+	if ok {
+		return value, true
+	}
+
+	for i, r := range s {
+		if r != '{' && r != '[' {
+			continue
+		}
+
+		value, ok = decodeJSONValue(s[i:])
+		if ok {
+			return value, true
+		}
+	}
+
+	return "", false
+}
+
+func decodeJSONValue(s string) (string, bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return "", false
+	}
+	if len(raw) == 0 {
+		return "", false
+	}
+
+	return string(raw), true
 }
 
 // Client is an Ollama HTTP client for entity/edge extraction and embeddings.
@@ -193,7 +247,7 @@ func (c *Client) ExtractEntities(ctx context.Context, content string) (*Extracte
 	}
 
 	var result ExtractedEntities
-	if err := json.Unmarshal([]byte(sanitizeJSON(raw)), &result); err != nil {
+	if err := json.Unmarshal([]byte(cleanStructuredContent(raw)), &result); err != nil {
 		return nil, fmt.Errorf("entity JSON: %w (raw: %s)", err, truncate(raw, 120))
 	}
 	return &result, nil
@@ -217,7 +271,7 @@ func (c *Client) ExtractEdges(ctx context.Context, entities []ExtractedEntity, c
 		return nil, err
 	}
 
-	clean := sanitizeJSON(raw)
+	clean := cleanStructuredContent(raw)
 	var result ExtractedEdges
 	if err := json.Unmarshal([]byte(clean), &result); err != nil {
 		// gemma3:4b sometimes returns a bare array instead of {"edges":[...]}
@@ -279,10 +333,11 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 		},
 		"format":       "json", // Ollama-native JSON mode
 		"stream":       false,
-		"keep_alive":   -1, // model stays loaded forever — no reload between jobs
-		"cache_prompt": true, // reuse KV-cache for system prompt across calls
+		"think":        false, // qwen3.5 should answer directly here; robust JSON extraction handles stray markup
+		"keep_alive":   -1,    // model stays loaded forever — no reload between jobs
+		"cache_prompt": true,  // reuse KV-cache for system prompt across calls
 		"options": map[string]any{
-			"num_ctx":     2048, // explicit context window — smaller = faster attention
+			"num_ctx":     8192, // must match Answer's num_ctx — Ollama pins KV cache at first load
 			"num_predict": 4096, // max output tokens
 			"temperature": 0,
 		},
@@ -323,12 +378,69 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 		return "", latency, fmt.Errorf("unmarshal: %w", err)
 	}
 
+	return strings.TrimSpace(cleanStructuredContent(cr.Message.Content)), latency, nil
+}
+
+// Answer sends a free-text prompt to the LLM and returns the response.
+// Unlike extraction methods, this does not force JSON output format.
+// maxTokens controls num_predict (0 defaults to 128).
+func (c *Client) Answer(ctx context.Context, system, user string, maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = 128
+	}
+	body := map[string]any{
+		"model": c.extractModel,
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+		"stream":       false,
+		"think":        false, // disable thinking for qwen3.5/deepseek — short factual answers, no reasoning
+		"keep_alive":   -1,
+		"cache_prompt": true,
+		"options": map[string]any{
+			"num_ctx":     8192, // large context for QA with many search results
+			"num_predict": maxTokens,
+			"temperature": 0,
+		},
+	}
+
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/chat", bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, truncate(string(data), 80))
+	}
+
+	var cr struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(data, &cr); err != nil {
+		return "", fmt.Errorf("unmarshal: %w", err)
+	}
+
+	// Use content (final answer), not thinking (reasoning trace).
 	content := cr.Message.Content
 	content = thinkRe.ReplaceAllString(content, "")
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	return strings.TrimSpace(content), latency, nil
+	content = thinkUnclosedRe.ReplaceAllString(content, "")
+	return strings.TrimSpace(content), nil
 }
 
 func truncate(s string, n int) string {
