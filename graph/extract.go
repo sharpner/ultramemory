@@ -105,18 +105,53 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		"llm_ms", time.Since(start).Milliseconds(),
 	)
 
-	// ── 5. Resolve entities: embed → FTS dedup → upsert → link ──────────────
+	// ── 5. Batch-embed all entity descriptions + edge facts in one API call ──
+	// Collecting all texts upfront avoids N×round-trips to nomic-embed-text.
+	// Entities come first (indices 0..len-1), edges follow.
+	batchTexts := make([]string, 0, len(extracted.Entities)+len(edges.Edges))
+	for _, ent := range extracted.Entities {
+		t := ent.Description
+		if t == "" {
+			t = entityEmbedText(ent.Name, ent.EntityType)
+		}
+		batchTexts = append(batchTexts, t)
+	}
+	for _, ex := range edges.Edges {
+		if ex.Fact != "" {
+			batchTexts = append(batchTexts, ex.Fact)
+		} else {
+			batchTexts = append(batchTexts, "") // placeholder — will yield nil embedding
+		}
+	}
+
+	batchEmbs, batchErr := e.llm.EmbedBatch(ctx, batchTexts)
+	if batchErr != nil {
+		slog.Debug("embed batch failed, falling back to sequential", "err", batchErr)
+		batchEmbs = nil // signals fallback below
+	}
+
+	embAt := func(i int) []float32 {
+		if batchEmbs != nil && i < len(batchEmbs) {
+			return batchEmbs[i]
+		}
+		return nil
+	}
+
+	// ── 6. Resolve entities: dedup → upsert → link ───────────────────────────
 	entityUUIDs := make([]string, len(extracted.Entities))
 	for i, ent := range extracted.Entities {
-		// Embed the LLM-generated description — richer signal than bare names.
-		// Falls back to sentence template if description is empty.
-		embInput := ent.Description
-		if embInput == "" {
-			embInput = entityEmbedText(ent.Name, ent.EntityType)
-		}
-		vec, err := e.llm.Embed(ctx, embInput)
-		if err != nil {
-			slog.Debug("embed entity failed", "name", ent.Name, "err", err)
+		vec := embAt(i)
+		if vec == nil {
+			// Batch failed — fall back to single embed.
+			t := ent.Description
+			if t == "" {
+				t = entityEmbedText(ent.Name, ent.EntityType)
+			}
+			vec, err = e.llm.Embed(ctx, t)
+			if err != nil {
+				slog.Debug("embed entity failed", "name", ent.Name, "err", err)
+				vec = nil
+			}
 		}
 
 		e.muEntity.Lock()
@@ -132,16 +167,18 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		}
 	}
 
-	// ── 6. Store edges (with fact embeddings for vector search) ──────────────
-	for _, ex := range edges.Edges {
+	// ── 7. Store edges (embeddings from batch, fallback to sequential) ────────
+	entCount := len(extracted.Entities)
+	for ei, ex := range edges.Edges {
 		if ex.SourceEntityID < 0 || ex.SourceEntityID >= len(entityUUIDs) {
 			continue
 		}
 		if ex.TargetEntityID < 0 || ex.TargetEntityID >= len(entityUUIDs) {
 			continue
 		}
-		var edgeEmb []float32
-		if ex.Fact != "" {
+		edgeEmb := embAt(entCount + ei)
+		if edgeEmb == nil && ex.Fact != "" {
+			// Batch failed — fall back to single embed.
 			edgeEmb, err = e.llm.Embed(ctx, ex.Fact)
 			if err != nil {
 				slog.Debug("embed edge fact failed", "fact", ex.Fact, "err", err)

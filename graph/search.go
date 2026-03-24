@@ -159,11 +159,26 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		rrf["ent:"+a.UUID] += 1.0 / float64(k+rank+1)
 	}
 
+	// Signal 3c: MAGMA neighborhood expansion — DISABLED (v45 finding, 2026-03-24).
+	// v45 (all adjacent edges): -0.3% overall (open-domain +1.9%, adversarial -2.7%)
+	// v45b (both-endpoints filter): -1.1% overall (single-hop -5.8%)
+	// Both variants are within the ±3% noise floor; no reliable improvement.
+	// Root cause: graph is too sparse (88 edges, 89 entities) — MAGMA-activated edges mostly
+	// duplicate what FTS already finds. EdgesForEntities() stored in store/edges.go for future use.
+
 	// Signal 3b: MAGMA episode backfill — DISABLED (v28 finding).
 	// v28 benchmark vs v23: -7.6% adversarial, -5.3% single-hop, -3% overall.
 	// Linked episodes add attribution noise: MAGMA-discovered entities' episodes
 	// flood the context with indirectly-related dialogue, confusing the LLM.
 	// FTS + MAGMA + episode vector search is sufficient; backfill adds more noise than signal.
+
+	// Signal 5: Synapse §3.1 Selective Episode Backfill — DISABLED (v38 finding, 2026-03-24).
+	// v38 benchmark: -4.4% overall (41.0% vs 45.4% v37). Worst categories:
+	//   open-domain: -6.6%, adversarial: -5.8%, multi-hop: -2.4%
+	// Root cause: Entity-linked episodes add too much peripheral context for open-domain/adversarial
+	// queries — same flooding problem as v28 (MAGMA entities → episodes) and v32 (episode → MAGMA seeds).
+	// All three directions of episodic bridging (v28, v32, v38) have been tried and all regress.
+	// Conclusion: FTS + MAGMA + episode vector search is the stable 3-signal baseline.
 
 	// Signal 4: Community affinity (Leiden §4 — community-bounded retrieval).
 	// Entities and edges in the same community as seed entities get a boost.

@@ -33,11 +33,7 @@ Rules:
 
 Example 1:
 Input: "Alice works at Google in Berlin since 2020."
-Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person", "description": "Alice is a professional who works at Google in Berlin"}, {"name": "Google", "entity_type": "Organization", "description": "Google is a technology company where Alice works"}, {"name": "Berlin", "entity_type": "Place", "description": "Berlin is the city where Alice works at Google"}]}
-
-Example 2 (German text, canonical forms):
-Input: "Der Chef der Deutschen Bahn sprach über Hamburgs Verkehrsprobleme."
-Output: {"extracted_entities": [{"name": "Deutsche Bahn", "entity_type": "Organization", "description": "Deutsche Bahn is a German railway company whose CEO discussed traffic problems"}, {"name": "Hamburg", "entity_type": "Place", "description": "Hamburg is a German city experiencing traffic problems"}]}`
+Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person", "description": "Alice is a professional who works at Google in Berlin"}, {"name": "Google", "entity_type": "Organization", "description": "Google is a technology company where Alice works"}, {"name": "Berlin", "entity_type": "Place", "description": "Berlin is the city where Alice works at Google"}]}`
 
 const edgeSystem = `Extract relationships between the listed entities. Output JSON only, no explanation.
 
@@ -46,7 +42,7 @@ Empty: {"edges": []}
 
 Rules:
 - relation_type: English SCREAMING_SNAKE_CASE always, even for non-English input text
-- WORKS_AT: employment/job ONLY — NOT for events, conferences, locations, or conflicts
+- WORKS_AT: paid employment/job ONLY — NOT for hobbies, interests, aspirations, events, or attended groups
 - fact: one complete English sentence about the relationship
 - valid_at / invalid_at: ISO 8601 date if mentioned in text, otherwise null
 - Only connect entities from the given list using their IDs
@@ -105,6 +101,11 @@ type ExtractedEdges struct {
 // EmbeddingResponse is the Ollama /api/embeddings response.
 type EmbeddingResponse struct {
 	Embedding []float32 `json:"embedding"`
+}
+
+// EmbedBatchResponse is the Ollama /api/embed batch response.
+type EmbedBatchResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -319,6 +320,51 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		return nil, fmt.Errorf("embed unmarshal: %w", err)
 	}
 	return er.Embedding, nil
+}
+
+// EmbedBatch generates embeddings for multiple texts in a single Ollama /api/embed call.
+// Returns one embedding per input text in the same order. On error, returns nil.
+// Falls back to sequential Embed calls if the batch endpoint is unavailable.
+func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	body := map[string]any{
+		"model":      c.embeddingModel,
+		"input":      texts,
+		"keep_alive": -1,
+	}
+	raw, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/embed", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("embed batch request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64MB max for large batches
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("embed batch HTTP %d: %s", resp.StatusCode, truncate(string(data), 80))
+	}
+
+	var er EmbedBatchResponse
+	if err := json.Unmarshal(data, &er); err != nil {
+		return nil, fmt.Errorf("embed batch unmarshal: %w", err)
+	}
+	if len(er.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("embed batch: got %d embeddings for %d texts", len(er.Embeddings), len(texts))
+	}
+	return er.Embeddings, nil
 }
 
 // chat sends a chat completion to Ollama and returns cleaned JSON content + latency.

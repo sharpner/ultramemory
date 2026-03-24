@@ -55,7 +55,8 @@ func classifyEdge(edgeName string) EdgeClass {
 		return EdgeUnknown
 	}
 	n := strings.ToUpper(strings.TrimSpace(edgeName))
-	for _, s := range []string{"CAUSES", "RESULTS_IN", "LEADS_TO", "CAUSED_BY", "TRIGGERS", "PRODUCES"} {
+	// Use short substrings so TRIGGERED_BY matches "TRIGGER", RESULTED_IN matches "RESULT".
+	for _, s := range []string{"CAUSE", "RESULT", "LEADS_TO", "TRIGGER", "PRODUCES"} {
 		if strings.Contains(n, s) {
 			return EdgeCausal
 		}
@@ -65,7 +66,11 @@ func classifyEdge(edgeName string) EdgeClass {
 			return EdgeTemporal
 		}
 	}
-	for _, s := range []string{"KNOWS", "RELATED_TO", "MEMBER_OF", "PART_OF", "CONNECTED_TO"} {
+	// Social/structural relations between entities.
+	// MARRIED_TO, ALLIED_WITH, OPPOSES, LOVES, PARENT_OF, CHILD_OF, COMMANDS, SERVES_UNDER
+	// all fall through from the edgeSystem prompt but were previously EdgeAttributive.
+	for _, s := range []string{"KNOWS", "RELATED_TO", "MEMBER_OF", "PART_OF", "CONNECTED_TO",
+		"MARRIED", "ALLIED", "OPPOS", "LOVES", "PARENT", "CHILD_OF", "COMMAND", "SERVES"} {
 		if strings.Contains(n, s) {
 			return EdgeRelational
 		}

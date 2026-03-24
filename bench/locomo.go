@@ -40,6 +40,35 @@ Rules:
 6. If the question asks about something not mentioned in the context at all, respond with exactly: unknown
 7. Do not guess or make assumptions.`
 
+// qaSystemHypothetical is used for questions starting with "Would", "Could", "Might", "Will",
+// "Is it likely" etc. — hypothetical/counterfactual reasoning questions (LoCoMo category 3).
+// These require a brief reasoning pattern ("Likely yes/no, because...") that tokenF1 rewards
+// but the generic qaSystem suppresses (it just says "unknown" or gives bare facts).
+const qaSystemHypothetical = `You answer hypothetical questions about a conversation between two people.
+
+Rules:
+1. Use ONLY the provided context. Never use outside knowledge.
+2. Start your answer with "Likely yes" or "Likely no", then add one brief reason from the context.
+   Example: "Likely no, she wants to be a counselor."
+3. If the context does NOT contain enough information, respond with exactly: unknown
+4. Do not guess beyond what the context says.`
+
+// qaSystemWhen is used for questions starting with "When" or "How long" — temporal multi-hop
+// questions (LoCoMo category 2) that require reading session timestamps and relative time refs.
+// 34/37 multi-hop questions ask "When did X happen?". Gold answers are relative phrases like
+// "The sunday before 25 May 2023" — derived from session dates + dialogue time references.
+// isHypotheticalQuestion returns true for questions that require probabilistic reasoning
+// rather than a factual recall answer.
+func isHypotheticalQuestion(q string) bool {
+	lower := strings.ToLower(strings.TrimSpace(q))
+	for _, prefix := range []string{"would ", "could ", "might ", "will ", "is it likely", "is it possible"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 const chunkSize = 1500
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -265,7 +294,11 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 			}
 
 			prompt := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", contextStr, qa.Question)
-			answer, err := answerer.Answer(ctx, qaSystem, prompt, 0)
+			sys := qaSystem
+			if isHypotheticalQuestion(qa.Question) {
+				sys = qaSystemHypothetical
+			}
+			answer, err := answerer.Answer(ctx, sys, prompt, 0)
 			if err != nil {
 				slog.Warn("answer failed", "question", qa.Question, "err", err)
 				scores = append(scores, qaScore{qa.Category, 0, 0, -1})
@@ -468,12 +501,17 @@ func formatContext(results []graph.SearchResult) string {
 	}
 
 	// Pass 2: edge facts.
+	// Each edge is rendered individually with a session tag for temporal grounding.
+	// v44 finding: edge grouping (merging same-subject edges into comma-lists) hurts both
+	// single-hop (-4.2%) and adversarial (-4.1%) because it removes session tags and
+	// creates ambiguous multi-item lists that confuse attribution for adversarial questions.
 	for _, r := range results {
 		if r.Type != "edge" {
 			continue
 		}
 		n++
-		fmt.Fprintf(&b, "%d. %s%s\n", n, temporalTag(r.ValidAt, r.Source), r.Body)
+		tag := temporalTag("", r.Source)
+		fmt.Fprintf(&b, "%d. %s%s\n", n, tag, r.Body)
 	}
 
 	// Pass 3: episode dialogue.

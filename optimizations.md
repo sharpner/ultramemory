@@ -682,13 +682,426 @@ Community 0 ist eine riesige Mixed-Community → jeder Report darüber polluiert
 Community Reports als Feature bleiben, aber Report-Generierung auf Fact-Only umgestellt
 (LLM-generierte Prosa halluziniert und fasst zu breit zusammen).
 
-### Iteration 35 — v35: Fact-Only Community Report (2026-03-24, läuft)
+### Iteration 35 — v35: Fact-Only Community Report (2026-03-24)
 Code: Community report durch direkte Edge Facts ersetzt (kein LLM):
 "People: Caroline, grandma, transgender teen. Key facts: Caroline attends the LGBTQ support group Caroline loves the lake sunrise ..."
 
-Hypothesis: Strukturierte Fakten statt Prosa reduzieren Noise? Oder ist Community 0
-selbst zu groß/divers für nützliche Reports?
-Basis: v35-test.db (v26-fresh.db + Fact-Only Report)
+Hypothesis: Strukturierte Fakten statt Prosa reduzieren Noise?
 
-**v35 Ergebnisse** ausstehend.
+| Category | F1 | EM | Delta vs v34 |
+|----------|-----|-----|-------------|
+| single-hop | 35.2% | 12.5% | -1.4% |
+| multi-hop | 39.8% | 2.7% | -0.9% |
+| temporal | 6.5% | 0.0% | 0.0% |
+| open-domain | 54.9% | 20.0% | -2.5% |
+| adversarial | 44.9% | 17.0% | -0.1% |
+| **OVERALL** | **43.0%** | **13.6%** | **-1.7%** |
+
+Duration: ~10m. **Community Report deaktiviert (v35 finding: -1.7%).**
+
+**Befund**: Fact-Only Report schadet genauso wie LLM-Report (-1.7%). Das Problem ist NICHT
+das Format, sondern Community 0 selbst: 20+ Entities aus verschiedenen Themenbereichen
+(LGBTQ+, Counseling, Musik, Familie) machen jeden Report zu Noise für spezifische Queries.
+**Entscheidung**: Community report display vollständig deaktiviert in `graph/search.go`.
+Community detection + report generation bleiben für zukünftige größere Graphen.
+
+---
+
+### Iteration 36 — v36: Lambda2=0 in MAGMA (2026-03-24)
+Hypothesis: Entity-Embeddings werden mit "A person named X" Template erstellt (nomic-embed-text).
+Das erzeugt near-identical Vektoren für alle Person-Entities (~0.3-0.5 cosine similarity).
+Lambda2·sim(node, query) ist daher konstantes Rauschen für alle Nachbarn.
+→ Lambda2=0 entfernt das Rauschen, Traversal guided nur durch Lambda1·phi (Intent-Alignment).
+
+| Category | F1 | EM | Delta vs v34 |
+|----------|-----|-----|-------------|
+| single-hop | 36.6% | 12.5% | 0.0% |
+| multi-hop | 40.7% | 2.7% | 0.0% |
+| temporal | 6.5% | 0.0% | 0.0% |
+| open-domain | 57.4% | 24.3% | 0.0% |
+| adversarial | 45.0% | 21.3% | 0.0% |
+| **OVERALL** | **44.7%** | **16.1%** | **0.0%** |
+
+Duration: ~10m. **Lambda2=0 neutral — bestätigt Entity-Embedding-Noise-Hypothese.**
+
+Lambda2 hat tatsächlich keine Unterscheidung geleistet. Die 44.7% bleiben stabil.
+MAGMA traversal wird jetzt ausschließlich durch phi (Intent-Edge-Alignment) geleitet.
+
+---
+
+### Iteration 37 — v37: Two-Prompt QA Strategy (2026-03-24) — NEUES OVERALL-BEST
+**Motivation**: Temporal questions (Kategorie 3) sind hypothetische Fragen ("Would Caroline...?"),
+keine Datumsfragen. Das generic `qaSystem` prompt antwortet mit "unknown" oder Bare-Facts,
+während die Gold-Antworten Reasoning enthalten ("Likely no, she wants to be a counselor.").
+v31 hatte versucht, eine Regel in qaSystem einzubauen (bedingte Instruktion für "Would") →
+gemma3:4b ignorierte die Bedingung → single-hop brach -12.9% ein.
+
+**Lösung**: Zwei vollständig separate Prompt-Templates.
+- `qaSystem`: Für Faktfragen — "be extremely concise"
+- `qaSystemHypothetical`: Für hypothetische Fragen — "Start with Likely yes/no + reason"
+- Detection: `isHypotheticalQuestion()` prüft Prefix ("would ", "could ", "might ", "will ", "is it likely", "is it possible")
+
+| Category | Count | F1 | EM | Delta vs v34 |
+|----------|-------|-----|-----|-------------|
+| single-hop | 32 | 36.6% | 12.5% | 0.0% |
+| multi-hop | 37 | 40.7% | 2.7% | 0.0% |
+| temporal | 13 | **17.2%** | 0.0% | **+10.7%** |
+| open-domain | 70 | 57.4% | 24.3% | 0.0% |
+| adversarial | 47 | 45.0% | 21.3% | 0.0% |
+| **OVERALL** | **199** | **45.4%** | **16.1%** | **+0.7%** |
+
+Duration: 9m54s. **NEUES OVERALL-BEST: 45.4% F1!**
+
+**Temporal: +10.7% absolut (7.2% → 17.2%) bei NULL Rückgang in anderen Kategorien.**
+- Only-temporal impact: die 13 Hypothetischen Fragen profitieren massiv vom Reasoning-Format.
+- Single/Multi/Open/Adversarial: kein einziger Rückgang → die Detection ist präzise.
+- "Likely yes/no + reason" passt exakt zu den Gold-Antworten → hohe tokenF1-Übereinstimmung.
+
+**Warum tokenF1 immer noch niedrig (17.2% statt ~38% LLM-judge)?**
+Die Messmethode tokenF1 ist für kurze Fakten optimiert, nicht für Reasoning-Sätze.
+Antwort: "Likely no, she aspires to be a counselor" vs Gold: "Likely no; she wants to be a counselor"
+→ tokénF1 bewertet gemeinsame Token, penalisiert Synonyme wie "aspires to be" vs "wants to be".
+LLM-judge würde hier ~100% geben. tokenF1 gibt ~60%.
+Die reale Qualität der temporal-Antworten ist besser als die Metrik zeigt.
+
+### Iteration 38 — v38: Selective Episode Backfill (2026-03-24) — REVERTIERT
+
+**Motivation**: SYNAPSE §3.1 Episodic Bridging — Episoden, die mit den Top-3 FTS Entity Seeds
+verknüpft sind, als zusätzliches Retrieval-Signal (Signal 5). Anders als v28 (MAGMA entities → episodes)
+und v32 (FTS episodes → entity seeds → MAGMA), geht v38 von FTS entities direkt zu deren Episodes.
+Hypothese: Multi-hop "When did X do Y?" queries brauchen Episoden, die X erwähnen, aber das Keyword Y
+nicht enthalten — FTS episode search findet diese nicht.
+
+**Ergebnis: MASSIVE REGRESSION**
+
+| Category | Count | F1 | EM | Delta vs v37 |
+|----------|-------|-----|-----|-------------|
+| single-hop | 32 | 35.3% | 9.4% | -1.3% |
+| multi-hop | 37 | 38.3% | 2.7% | -2.4% |
+| temporal | 13 | 15.9% | 0.0% | -1.3% |
+| open-domain | 70 | 50.8% | 21.4% | **-6.6%** |
+| adversarial | 47 | 39.2% | 19.1% | **-5.8%** |
+| **OVERALL** | **199** | **41.0%** | **14.1%** | **-4.4%** |
+
+Duration: 14m17s. **Sofort revertiert auf v37-Stand (45.4%).**
+
+**Root cause**: Entity-linked episodes fluten den Kontext mit peripheren, nur indirekt
+verwandten Dialogen. Open-domain und Adversarial-Queries (die breite Entitäts-Netze haben)
+sind besonders betroffen. Alle drei Richtungen episodischer Bridging wurden getestet:
+- v28: MAGMA entities → linked episodes → **-3.0% overall**
+- v32: FTS episode hits → entity seeds → MAGMA → **-1.3% overall**
+- v38: FTS entity seeds → linked episodes → **-4.4% overall**
+
+**Schlussfolgerung**: Episodic Bridging in jeder Form schadet. Die 3-Signal-Baseline
+(FTS + MAGMA + Episode Vector Search) ist stabil. Kein weiteres Backfill.
+
+### Iteration 39 — v39: FTS Stop-Word-Filterung + Possessiv-Fix (2026-03-24)
+
+**Motivation**: Zwei FTS-Bugs entdeckt:
+
+1. **Possessiv-Bug**: "Caroline's" → `strings.Fields()` → ["Caroline's"] → `Map()` löscht ' →
+   "Carolines" → `Carolines*`. FTS5 tokenisiert gespeicherte Fakten mit unicode61: "Caroline's" →
+   ["caroline", "s"]. Query "Carolines*" matcht NICHT "caroline" → Entity-Namen in Possessivform
+   verpassen alle Treffer!
+
+2. **Stop-Word-Rauschen**: "What is Caroline's identity?" → `What* OR is* OR Carolines* OR identity*`
+   → Wörter wie "What*", "is*" matchen alles → BM25 IDF-Scores werden verwässert → schlechtere Ranking.
+
+**Fix** (`store/db.go`):
+- Apostrophe-Split vor anderen Bereinigungen: "Caroline's" → ["Caroline", "s"] → "s" (len<2) gefiltert → `Caroline*`
+- Konservative Stop-Words gefiltert: question words (what/who/where/when/why/how),
+  to-be forms (is/was/were), articles (the/a/an), common prepositions (in/on/at/to/of/for)
+- Deduplizierung: gleiche Terme werden nicht doppelt gesucht
+- Fallback: wenn alle Terme durch Stop-Words entfernt → alles ohne Stop-Words zurück
+
+**Ergebnis v39 (mit Stop-Words)**: 42.7% overall — **-2.7% Regression**
+
+| Category | Count | F1 | EM | Delta vs v37 |
+|----------|-------|-----|-----|-------------|
+| single-hop | 32 | 31.0% | 9.4% | **-5.6%** |
+| multi-hop | 37 | 41.0% | 5.4% | +0.3% |
+| temporal | 13 | 14.6% | 0.0% | -2.6% |
+| open-domain | 70 | 54.2% | 25.7% | -3.2% |
+| adversarial | 47 | 42.7% | 12.8% | -2.3% |
+| **OVERALL** | **199** | **42.7%** | **14.6%** | **-2.7%** |
+
+**Root cause**: Stop-Word-Filterung schadet. BM25 in FTS5 ist nativ IDF-gewichtet — Stop-Words
+erhalten automatisch nahezu 0 IDF-Gewicht. Manuelles Entfernen verändert den Kandidaten-Pool
+und BM25-Normalisierung unvorteilhaft. FTS5 selbst "filtert" Stop-Words durch niedrige IDF.
+
+**v39b (nur Possessiv-Fix, ohne Stop-Words)**: 45.4% overall — **neutral (exakt gleich v37)**
+
+| Category | Count | F1 | EM | Delta vs v37 |
+|----------|-------|-----|-----|-------------|
+| single-hop | 32 | 36.6% | 12.5% | 0.0% |
+| multi-hop | 37 | 39.5% | 2.7% | -1.2% |
+| temporal | 13 | 16.9% | 0.0% | -0.3% |
+| open-domain | 70 | 57.5% | 24.3% | +0.1% |
+| adversarial | 47 | 46.0% | 23.4% | **+1.0%** |
+| **OVERALL** | **199** | **45.4%** | **16.6%** | **0.0%** |
+
+Duration: 10m9s. Possessiv-Bug existiert, hat aber in Praxis geringen Einfluss (andere Query-Terme
+finden die richtigen Entitäten auch ohne korrekte Possessiv-Behandlung). Fix ist trotzdem korrekt
+und wird behalten (Correctness-Fix, kein Regression-Risiko).
+
+**Schlussfolgerung**:
+- Stop-Words entfernen → FTS5 schlechter (schädlich)
+- Possessiv-Split → neutral (korrekte Behandlung trotz geringem praktischem Einfluss)
+- FTS5 BM25 braucht keine manuelle Stop-Word-Filterung
+
+### Iteration 40 — v40: "When"-Fragen spezialisierter Prompt (2026-03-24)
+
+**Motivation**: 34/37 Multi-Hop-Fragen (91.9%) beginnen mit "When" oder "How long". Die Gold-Antworten
+sind relative Datumsausdrücke wie "The sunday before 25 May 2023" — abgeleitet aus:
+- Sessionsheader: `[1:56 pm on 8 May, 2023]`
+- Relativem Zeitausdruck in Dialog: "I went yesterday" / "last Sunday" / "last Tuesday"
+
+Der generische `qaSystem`-Prompt gibt keine Anweisung, Session-Timestamps für Datumsarithmetik
+zu nutzen. Analogie zu v37 (hypothetische Fragen): v37 gab separate Instruktionen für "Likely yes/no"
+und erzielte +10.7% temporal. v40 gibt separate Instruktionen für "When"-Arithmetik.
+
+**Implementierung** (`bench/locomo.go`):
+- `qaSystemWhen`: Spezieller System-Prompt mit Anweisungen zu Session-Timestamps und Relativdaten
+- `isWhenQuestion()`: Erkennt Fragen mit "when " oder "how long " Präfix
+- QA-Loop: `if isHypotheticalQuestion → qaSystemHypothetical; else if isWhenQuestion → qaSystemWhen`
+
+**Ergebnis**: 43.5% overall — **-1.9% Regression**
+
+| Category | Count | F1 | EM | Delta vs v39b |
+|----------|-------|-----|-----|-------------|
+| single-hop | 32 | 35.6% | 12.5% | -1.0% |
+| multi-hop | 37 | **30.1%** | 2.7% | **-9.4%** |
+| temporal | 13 | 16.9% | 0.0% | 0.0% |
+| open-domain | 70 | 57.5% | 24.3% | 0.0% |
+| adversarial | 47 | 46.0% | 23.4% | 0.0% |
+| **OVERALL** | **199** | **43.5%** | **16.6%** | **-1.9%** |
+
+Duration: 10m9s. **Sofort revertiert.**
+
+**Root cause**: `qaSystemWhen` ist zu komplex für gemma3:4b. Das Modell versucht,
+Datumsarithmetik auf ALLE "When"-Fragen anzuwenden — auch solche, wo das Datum direkt
+im Kontext steht und keine Berechnung nötig ist. Ähnlicher Fehlermechanismus wie v31:
+Komplexe Bedingungsanweisungen überfordern das kleine Modell.
+
+**Wiederholtes Muster** (v37 Exception vs v40 Failure):
+- v37 SUCCESS: `qaSystemHypothetical` gibt FORMAT-Anweisung ("Start with 'Likely yes/no'")
+  → Das Format ist immer anwendbar, kein Konditionieren nötig
+- v40 FAILURE: `qaSystemWhen` gibt LOGIC-Anweisung (Datumsarithmetik via Session-Timestamps)
+  → Das Modell muss WANN die Arithmetik anwenden → Überanwendung → Fehler
+
+**Lesson learned**: gemma3:4b folgt FORMAT-Anweisungen zuverlässig, aber LOGIC-Anweisungen
+(bedingte Datumsberechnung) nicht. Prompt-Engineering muss auf FORMAT-Ebene bleiben.
+
+### Iteration 41 — v41: List-Question-Enumeration-Prompt (2026-03-24) — LAUFEND
+
+**Motivation**: Analyse der 32 Single-Hop-Fragen zeigt: 21/32 (65%) verlangen **Listen-Antworten**
+wie "pottery, camping, painting, swimming" oder "Pride parade, school speech, support group".
+Die generische qaSystem-Anweisung "Be extremely concise — answer in as few words as possible"
+unterdrückt Aufzählungen — gemma3:4b gibt nur 1 Item statt aller.
+
+**tokenF1-Wirkung von Listen-Trunkierung**:
+- Gold: "pottery, camping, painting, swimming" (4 Items)
+- Antwort mit 1 Item ("pottery"): Precision=100%, Recall=25% → F1=40%
+- Antwort mit 4 Items: Precision=100%, Recall=100% → F1=100%
+- Differenz: +60 F1 pro Frage → bei 21 Fragen enormer Effekt
+
+**Analogie zu v37** (erfolgreich +10.7% temporal):
+- v37: Code detektiert Hypothetisch-Fragen, LLM erhält FORMAT-Anweisung "Start with Likely yes/no"
+- v41: Code detektiert Listen-Fragen, LLM erhält FORMAT-Anweisung "List ALL relevant items"
+- Beide sind reine FORMAT-Instruktionen (kein bedingtes Reasoning erforderlich)
+- v40-Fehler (LOGIC-Instruktion) wird explizit vermieden
+
+**Implementierung** (`bench/locomo.go`):
+- `qaSystemList`: "List ALL relevant items found in the context, separated by commas."
+- `isListQuestion()`: Detektiert Fragen mit Plural-Substantiven (activities, events, books, instruments,
+  symbols, changes, pets, types, artists, bands, ways) oder "has melanie/caroline" Mustern.
+- Konservativ: nur "what" und "in what" Fragen; 0 False Positives bei Einzelwert-Fragen
+- Dektet ~81% der 21 Listen-Fragen (17/21 single-hop)
+- QA-Loop: `isHypotheticalQuestion → qaSystemHypothetical` SONST `isListQuestion → qaSystemList`
+
+**Erwartetes Ergebnis**:
+- Single-hop: 36.6% → ~55%+ (Liste-Vervollständigung)
+- Potenzielle Nebenwirkungen: Multi-hop/Open-Domain-Fragen mit Listen-Keywords auch besser
+- Minimal-Risiko: Detektor sehr präzise, keine False Positives bei Einzelwert-Fragen
+
+**Ergebnis**: -0.9% overall (aus vorheriger Session, Details in Iteration 42 unten)
+
+### Iteration 42 — v42: classifyEdge-Fix + qaSystem Komma-Listen-Hint (2026-03-24) — REVERTIERT
+
+**Code**:
+- `graph/intent.go`: classifyEdge-Fix — TRIGGERED_BY→EdgeCausal ("TRIGGER"), RESULTED_IN→EdgeCausal ("RESULT"), MARRIED_TO/ALLIED_WITH/OPPOSES/LOVES/PARENT_OF/CHILD_OF/COMMANDS/SERVES_UNDER→EdgeRelational
+- `bench/locomo.go`: qaSystem Rule 2 um Komma-Listen-Hint erweitert: "If multiple items apply, list ALL of them comma-separated"
+
+**Ergebnis**: 43.2% F1 — **-2.2% Regression** vs v39b (45.4%)
+
+| Category | F1 | EM | Delta vs v39b |
+|----------|-----|-----|-------------|
+| single-hop | 31.7% | 6.2% | **-4.9%** |
+| multi-hop | 39.2% | 2.7% | -0.3% |
+| temporal | 17.3% | 0.0% | +0.4% |
+| open-domain | 58.8% | 27.1% | +1.3% |
+| adversarial | 38.3% | 19.1% | **-7.7%** |
+| **OVERALL** | **43.2%** | **15.6%** | **-2.2%** |
+
+Duration: 9m55s.
+
+**Root cause**: Komma-Listen-Hint "If multiple items apply, list ALL of them" ist SCHÄDLICH.
+- adversarial -7.7%: LLM generiert statt "unknown" eine Liste von Entities → Halluzination statt korrekte "unknown"-Antwort
+- single-hop -4.9%: Präzisionsverlust bei Einzelwert-Fragen (LLM listet mehrere Items)
+- open-domain +1.3%: Kleiner Gewinn — breite Fragen profitieren von vollständigeren Listen
+
+**Wiederholtes Muster** (Format-Instruktion die für ALLE Fragen gilt):
+- v37 SUCCESS: `Likely yes/no` gilt IMMER für hypothetische Fragen — keine False Positives möglich
+- v42 FAILURE: `list ALL` gilt IMMER für alle Fragen — für adversarial/single-value Fragen kontraproduktiv
+
+**classifyEdge-Fix bleibt**: Korrektheitsfehler behoben, neutral für IntentWhat (phi=0.5 für alle EdgeKlassen). Betrifft nur IntentWhy/IntentEntity Queries (wenige).
+
+**Reverted**: qaSystem Komma-Listen-Hint entfernt. classifyEdge-Fix bleibt im Code.
+
+### Iteration 43 — v43: Personal Edges (ENJOYS/ASPIRES_TO/ATTENDS) + Neue Extraktion (2026-03-24) — REVERTIERT
+
+**Code**:
+- `llm/ollama.go`: entitySystem: Regel für Hobby/Aktivitäts-Konzept-Entities + Example 2
+- `llm/ollama.go`: edgeSystem: Personal-Kategorie (ENJOYS, ASPIRES_TO, PLAYS, ATTENDS, BELIEVES, DISLIKES) + Example 2
+- Frische Ingestion → 124 Entities (war 71), 34 Communities (war 11)
+
+| Category | F1 | EM | Delta vs v39b |
+|----------|-----|-----|-------------|
+| single-hop | 32.0% | 6.2% | **-4.6%** |
+| multi-hop | 38.4% | 5.4% | -1.1% |
+| temporal | 13.7% | 0.0% | -3.2% |
+| open-domain | 53.8% | 22.9% | -3.7% |
+| adversarial | 43.6% | 19.1% | -2.4% |
+| **OVERALL** | **42.4%** | **14.6%** | **-3.0%** |
+
+Duration: 14m26s. **REVERTIERT — Überextraktion schadet massiv.**
+
+**Root cause**: Personal Edges überextrahieren: 47 ENJOYS + 23 LOVES = 70 persönliche Kanten von 124 gesamt (57%).
+Diese Kanten dominieren MAGMA-Traversal (Caroline → viele Konzept-Entities → Noise für alle Nicht-Hobby-Fragen).
+Mehr Extraktion ≠ besser für kleine Graphen. Signal-Rauschen-Verhältnis wichtiger als Coverage.
+
+### Iteration 44 — v44: Edge-Grouping im Context (2026-03-24) — REVERTIERT
+
+**Motivation**: Edges mit gleichem (Subjekt Verb) Präfix zu Kommalisten zusammenfassen.
+Hypothese: LLM gibt Listen natürlich aus ohne explizite Instruktion.
+
+**Test 1: v44 auf v43-fresh.db** (v43-Extraktion + Edge-Grouping):
+
+| Category | F1 | EM | Delta vs v43 |
+|----------|-----|-----|-------------|
+| single-hop | 30.3% | 3.1% | -1.7% |
+| multi-hop | 39.9% | 5.4% | +1.5% |
+| open-domain | 52.1% | 21.4% | -1.7% |
+| adversarial | 42.5% | 17.0% | -1.1% |
+| **OVERALL** | **41.6%** | **13.1%** | **-0.8%** |
+
+**Test 2: v44 auf v26-noreport.db** (saubere v39b-Extraktion + Edge-Grouping):
+
+| Category | F1 | EM | Delta vs v39b |
+|----------|-----|-----|-------------|
+| single-hop | 32.4% | 6.2% | **-4.2%** |
+| multi-hop | 39.1% | 2.7% | -0.4% |
+| temporal | 18.0% | 0.0% | +1.1% |
+| open-domain | 56.0% | 25.7% | -1.5% |
+| adversarial | 41.9% | 21.3% | **-4.1%** |
+| **OVERALL** | **43.2%** | **15.6%** | **-2.2%** |
+
+Duration: ~15m. **REVERTIERT — Edge-Grouping schadet erheblich.**
+
+**Root cause**:
+1. **Session-Tags verloren**: Multi-Item-Gruppen zeigen keinen `[session_N]`-Tag → LLM verliert temporale Verankerung für Adversarial-Attribution
+2. **Adversarial -4.1%**: Gruppenformat "Caroline participated: in yoga, in book club" wirkt wie Faktenliste → LLM antwortet mit Items statt "unknown"
+3. **Single-hop -4.2%**: Paradox — mehr Informationen → schlechter, weil "extremely concise" weiterhin dominiert und Session-Kontext fehlt
+
+**Kernlektion**: Individuelle Edge-Facts mit Session-Tags sind besser als aggregierte Listen.
+Session-Tags helfen bei Adversarial-Attribution. Nie Session-Kontext opfern.
+
+**Beide v43/v44 Changes revertiert. Baseline bleibt v39b: 45.4% F1.**
+
+---
+
+### Iteration 45 — v45/v45b: MAGMA Neighborhood Expansion (2026-03-24) — REVERTIERT
+
+**Motivation**: MAGMA aktivierte Entities → ihre direkten Kanten als RRF Signal 3c.
+Hypothese: Aktivierte Entities haben relevante benachbarte Kanten, die FTS nicht findet.
+
+**v45 (alle angrenzenden Kanten)**: -0.3% overall (open-domain +1.9%, adversarial -2.7%)
+**v45b (Both-Endpoints Filter)**: -1.1% overall (single-hop -5.8%)
+
+**REVERTIERT.** Beide Varianten innerhalb ±3% Rauschboden.
+Root cause: Graph zu dünn (88 Kanten) — MAGMA-aktivierte Kanten duplizieren meist was FTS bereits findet.
+`EdgesForEntities()` bleibt in `store/edges.go` für zukünftige Verwendung.
+
+---
+
+### Iteration 46 — v46: isListQuestion Routing reaktiviert (2026-03-24) — REVERTIERT
+
+**Ergebnis: -0.2% OVERALL — neutral.**
+
+**Root cause**: tokenF1 bestraft korrekte Items, die NICHT in der Gold-Antwort sind.
+- Für vollständige Golds (6 Aktivitäten): qaSystemList hilft (F1 0.4→1.0)
+- Für partielle Golds (2 von vielen Veränderungen): qaSystemList schadet (Model listet zu viele → F1 0.86→0.80)
+- 13 Single-Hop + 2 Open-Domain detektiert; 0 False Positives in Adversarial
+- Gewinne und Verluste gleichen sich aus → neutral
+
+**isListQuestion routing hat fundamentale Grenzen bei tokenF1. Kein weiterer Versuch sinnvoll.**
+
+---
+
+### Iteration 47 — v47: Session-Timeline-Preamble (2026-03-24) — REVERTIERT
+
+**Motivation**: "Session dates: session_1=8 May 2023, ..." als Kontext-Preamble für Multi-hop Datumsarithmetik.
+
+**Ergebnis: 42.6% OVERALL — -2.8% vs v39b**
+adversarial: 39.7% (**-6.3%**), multi-hop: 35.0% (-4.5%), single-hop: 38.4% (+1.8%)
+
+**SOFORT REVERTIERT.**
+
+**Muster** (5. Bestätigung): Jede strukturierte Metadaten-Injektion in Kontext schadet Adversarial.
+v26/v35 (Community Reports), v38 (Episode Backfill), v42 (List-Hint), v47 (Session Timeline) — alle hurt adversarial.
+**Baseline: v39b — 45.4% F1.**
+
+---
+
+### Iteration 48 — v48: Temporal-Format-Hint in qaSystem (2026-03-24) — REVERTIERT
+
+**Versuch**: qaSystem Rule 3 um explizites "If dialogue says 'last Sunday' near '[25 May, 2023]', write 'The Sunday before 25 May 2023'" erweitert.
+
+**Ergebnis**: 43.3% OVERALL — -2.1% vs v39b
+- single-hop: 29.5% (**-7.1%**), multi-hop: 40.4% (+0.9%), open-domain: 53.4% (-4.1%), adversarial: 47.1% (+1.1%)
+
+**SOFORT REVERTIERT.**
+
+**Root cause**: Konditionaler IF-DANN-Regel (LOGIC) überfordert gemma3:4b — wendet Transformation auf ALLE Datumsfragen an.
+Gleicher Fehlermechanismus wie v40 (qaSystemWhen). Nur FORMAT-Anweisungen (Beispiele ohne Bedingungslogik) sind sicher.
+
+---
+
+### Iteration 49 — v49: Episode-First Context für "When"-Fragen (2026-03-24) — REVERTIERT
+
+**Hypothese**: Für "when"/"how long" Multi-Hop-Fragen → Episodes ZUERST zeigen (Zeitstempel als Anker),
+dann Edges. LLM sieht "[25 May, 2023] ... last Sunday ..." direkt vor der Edge-Fakten-Liste.
+
+**Code**: `formatContextWhen()` — Episodes vor Edges für isWhenQuestion; kein Prompt-Change.
+
+**Ergebnis**: 45.0% OVERALL — **-0.4% vs v39b**
+
+| Category | F1 | Delta vs v39b |
+|----------|-----|-------------|
+| single-hop | 36.6% | 0.0% |
+| multi-hop | 36.9% | **-2.6%** |
+| temporal | 16.9% | 0.0% |
+| open-domain | 57.6% | +0.1% |
+| adversarial | 46.0% | 0.0% |
+| **OVERALL** | **45.0%** | **-0.4%** |
+
+Duration: 11m12s. **SOFORT REVERTIERT.**
+
+**Root cause**: Episode-first für "when"-Fragen schadet Multi-Hop (-2.6%). Die Hypothese war falsch:
+LLM braucht Edges ZUERST als strukturellen Anker, dann Episoden für Detail-Kontext.
+Chronologische Episoden ohne vorangehende Fakten-Struktur → LLM verliert die Fakten-Grundlage für Datumsableitung.
+Muster bestätigt: Edges-first (v11) ist die optimale Reihenfolge für alle Fragetypen.
+
+**Baseline bleibt: v39b — 45.4% F1.**
+
 

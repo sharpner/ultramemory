@@ -115,6 +115,43 @@ func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit in
 	return out, rows.Err()
 }
 
+// EdgesForEntities returns all edges where source_uuid or target_uuid is in uuids.
+// Used by MAGMA neighborhood expansion: activated entities → adjacent edge facts.
+func (d *DB) EdgesForEntities(ctx context.Context, uuids []string, groupID string) ([]Edge, error) {
+	if len(uuids) == 0 {
+		return nil, nil
+	}
+	ph := placeholders(len(uuids))
+	args := make([]any, 0, 2*len(uuids)+1)
+	for _, u := range uuids {
+		args = append(args, u)
+	}
+	for _, u := range uuids {
+		args = append(args, u)
+	}
+	args = append(args, groupID)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT uuid, source_uuid, target_uuid, name, fact, valid_at
+		FROM edges
+		WHERE (source_uuid IN (`+ph+`) OR target_uuid IN (`+ph+`))
+		  AND group_id = ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.UUID, &e.SourceUUID, &e.TargetUUID, &e.Name, &e.Fact, &e.ValidAt); err != nil {
+			return nil, err
+		}
+		e.GroupID = groupID
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // AllEdgesWithEmbeddings loads all edges with embeddings for vector search.
 func (d *DB) AllEdgesWithEmbeddings(ctx context.Context, groupID string) ([]Edge, error) {
 	rows, err := d.sql.QueryContext(ctx,

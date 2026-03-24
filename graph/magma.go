@@ -41,7 +41,12 @@ func DefaultMAGMAConfig() MAGMAConfig {
 		MaxNodes:  200,
 		Decay:     0.5,
 		Lambda1:   1.0,
-		Lambda2:   0.5,
+		// Lambda2=0: entity embeddings use "A person named X" template format via nomic-embed-text,
+		// which produces near-identical vectors for all person entities. The cosine similarity
+		// between query and node embedding is therefore noise (constant ≈ 0.3-0.5 for all nodes).
+		// Setting Lambda2=0 removes this noisy signal, leaving traversal guided solely by
+		// intent-aware edge type alignment (Lambda1·phi). Test: v36.
+		Lambda2: 0,
 	}
 }
 
