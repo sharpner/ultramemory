@@ -57,85 +57,12 @@ Rules:
 // questions (LoCoMo category 2) that require reading session timestamps and relative time refs.
 // 34/37 multi-hop questions ask "When did X happen?". Gold answers are relative phrases like
 // "The sunday before 25 May 2023" — derived from session dates + dialogue time references.
-// The generic qaSystem doesn't instruct the LLM to use session timestamps for date calculation.
-// DISABLED (v40 finding): causes multi-hop regression (-9.4%). gemma3:4b fails LOGIC instructions
-// (conditional date arithmetic). Only FORMAT instructions are safe (like v37's Likely yes/no).
-const qaSystemWhen = `You answer questions about WHEN events happened in a conversation.
-
-Rules:
-1. Use ONLY the provided context. Never use outside knowledge.
-2. Dialogue sections start with a timestamp like "[1:56 pm on 8 May, 2023]" — this is the session date.
-3. Use relative time words with the session date to find event dates:
-   - "yesterday" before "[8 May, 2023]" → "7 May 2023"
-   - "last Sunday" before "[25 May, 2023]" → "The Sunday before 25 May 2023"
-   - "last Tuesday" before "[20 July, 2023]" → "The Tuesday before 20 July 2023"
-   - "the week before" a session → "The week before [session date]"
-4. If someone says they plan to do something "next June" or "in July 2023", use that time.
-5. For duration questions (How long...), give only the duration (e.g., "4 years", "since 2016").
-6. If the context does NOT contain enough information, respond with exactly: unknown
-7. Give only the date or duration — no extra explanation.`
-
-// qaSystemList — DISABLED (v41/v41b finding, 2026-03-24)
-// v41 regressed -0.9% overall (single-hop -4.5%). Root cause: keyword-based question detection
-// ("activities", "events", "books" etc.) is benchmark-specific overfitting, not a general
-// improvement. Additionally: "list ALL items" instruction caused verbose model responses
-// ("The activities include...") that destroy tokenF1 precision.
-// Lesson: isListQuestion was building special cases for LoCoMo's specific question distribution,
-// not improving the underlying retrieval/generation system. Reverted to v39b baseline.
-// The right fix for list questions is better graph coverage (re-ingestion) or improving
-// the base qaSystem prompt in a genuinely general way.
-const qaSystemList = `You answer questions about a conversation between two people.
-
-Rules:
-1. Use ONLY the provided context. Never use outside knowledge.
-2. Give ONLY a comma-separated list of all relevant items — no sentences, no explanations.
-   Good: "pottery, camping, painting, swimming"
-   Bad: "The activities Melanie partakes in include pottery, camping, and painting."
-3. Include every relevant item you find in the context — do not stop at the first one.
-4. If the context does NOT contain enough information, respond with exactly: unknown
-5. Do not guess or add items not found in the context.`
-
 // isHypotheticalQuestion returns true for questions that require probabilistic reasoning
 // rather than a factual recall answer.
 func isHypotheticalQuestion(q string) bool {
 	lower := strings.ToLower(strings.TrimSpace(q))
 	for _, prefix := range []string{"would ", "could ", "might ", "will ", "is it likely", "is it possible"} {
 		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// isWhenQuestion returns true for temporal questions asking about dates or durations.
-// These are LoCoMo category 2 (multi-hop temporal) — 34/37 start with "when", 3 with "how long".
-func isWhenQuestion(q string) bool {
-	lower := strings.ToLower(strings.TrimSpace(q))
-	return strings.HasPrefix(lower, "when ") || strings.HasPrefix(lower, "how long ")
-}
-
-// isListQuestion returns true for questions asking for multiple items of the same category.
-// These questions typically contain plural nouns as their object (activities, events, books, etc.)
-// and have multi-item gold answers. Uses substring matching on lowercase question text.
-//
-// v41b fix: removed "has melanie"/"has caroline" patterns — too broad, caused false positives
-// on single-value questions like "What career path has Caroline decided to pursue?" which
-// gave verbose list answers and destroyed tokenF1 precision.
-// Current design: only fires on clear plural-noun category questions (high precision).
-func isListQuestion(q string) bool {
-	lower := strings.ToLower(strings.TrimSpace(q))
-	// Only "what" and "in what" questions can be list questions here.
-	if !strings.HasPrefix(lower, "what ") && !strings.HasPrefix(lower, "in what ") {
-		return false
-	}
-	// Plural nouns that signal a multi-item answer is expected.
-	for _, noun := range []string{
-		"activities", "events", "books", "items", "types",
-		"instruments", "artists", "musicians", "bands",
-		"symbols", "changes", "pets", "places", "locations",
-		"ways", "kinds", " some ",
-	} {
-		if strings.Contains(lower, noun) {
 			return true
 		}
 	}
@@ -538,36 +465,6 @@ func formatSession(s Session) string {
 	return b.String()
 }
 
-// buildSessionTimeline returns a compact string mapping session numbers to their dates.
-// Format: "Session dates: session_1=8 May 2023, session_2=25 May 2023, ..."
-// Used as a context preamble for multi-hop temporal questions (LLM can look up session dates
-// without needing to parse timestamp headers from individual episodes).
-// This is an INFORMATION injection (not a logic instruction) — low risk.
-func buildSessionTimeline(sessions []Session) string {
-	var parts []string
-	for _, s := range sessions {
-		date := sessionDateShort(s.DateTime)
-		if date != "" {
-			parts = append(parts, fmt.Sprintf("session_%d=%s", s.Number, date))
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "Session dates: " + strings.Join(parts, ", ")
-}
-
-// sessionDateShort extracts "8 May 2023" from "1:56 pm on 8 May, 2023".
-func sessionDateShort(dateTime string) string {
-	idx := strings.Index(dateTime, " on ")
-	if idx < 0 {
-		return ""
-	}
-	date := dateTime[idx+4:]
-	date = strings.ReplaceAll(date, ",", "")
-	return strings.TrimSpace(date)
-}
-
 // temporalTag produces a readable time label for an edge fact in context.
 // Uses session tag from source path — all edges have a session, only ~50% have validAt.
 // Inconsistent date coverage (some edges dated, some not) confuses multi-hop reasoning.
@@ -629,56 +526,6 @@ func formatContext(results []graph.SearchResult) string {
 		}
 		fmt.Fprintf(&b, "%d. [dialogue] %s\n", n, body)
 	}
-	if n == 0 {
-		return "(no relevant facts found)"
-	}
-	return b.String()
-}
-
-// formatContextWhen is like formatContext but puts episodes before edges.
-// Used for isWhenQuestion (multi-hop temporal): timestamped dialogue appears first
-// so the LLM can anchor date calculations (e.g. "last Sunday" near "[25 May, 2023]")
-// before reading edge facts. v49 finding: context-ordering-only change, no prompt change.
-// Only fires for 34 "when"/"how long" questions (17% of 199) — zero risk for adversarial.
-func formatContextWhen(results []graph.SearchResult) string {
-	if len(results) == 0 {
-		return "(no relevant facts found)"
-	}
-	var b strings.Builder
-	n := 0
-
-	// Pass 1: community reports (unchanged).
-	for _, r := range results {
-		if r.Type != "community" {
-			continue
-		}
-		n++
-		fmt.Fprintf(&b, "%d. [background] %s\n", n, r.Body)
-	}
-
-	// Pass 2: episodes first — timestamps ground the date arithmetic.
-	for _, r := range results {
-		if r.Type != "episode" {
-			continue
-		}
-		n++
-		body := r.Body
-		if len(body) > 1500 {
-			body = body[:1500] + "..."
-		}
-		fmt.Fprintf(&b, "%d. [dialogue] %s\n", n, body)
-	}
-
-	// Pass 3: edge facts after episodes.
-	for _, r := range results {
-		if r.Type != "edge" {
-			continue
-		}
-		n++
-		tag := temporalTag("", r.Source)
-		fmt.Fprintf(&b, "%d. %s%s\n", n, tag, r.Body)
-	}
-
 	if n == 0 {
 		return "(no relevant facts found)"
 	}
