@@ -184,26 +184,38 @@ func DecodeEmbedding(b []byte) []float32 {
 }
 
 // fts5Query converts a user query into an FTS5 match expression.
-// Each word becomes a prefix term (word*) joined by AND.
-// Special FTS5 characters are stripped.
+// Each word becomes a prefix term (word*) joined by OR.
+// Possessives like "Caroline's" are split on apostrophe so "Caroline's" → "Caroline*" not "Carolines*".
+// (FTS5 unicode61 tokenizer stores "caroline", not "carolines" — the 's' suffix causes a mismatch
+// when the apostrophe is stripped rather than used as a split point.)
+// Tokens shorter than 2 chars (possessive "s", etc.) are dropped.
 func fts5Query(q string) string {
-	words := strings.Fields(q)
-	if len(words) == 0 {
-		return ""
+	// Split on whitespace first, then on apostrophes within each word.
+	var rawTokens []string
+	for _, word := range strings.Fields(q) {
+		parts := strings.FieldsFunc(word, func(r rune) bool {
+			return r == '\'' || r == '\u2019' || r == '`'
+		})
+		rawTokens = append(rawTokens, parts...)
 	}
-	terms := make([]string, 0, len(words))
-	for _, w := range words {
-		// Strip FTS5 special chars to avoid syntax errors.
+
+	terms := make([]string, 0, len(rawTokens))
+	for _, w := range rawTokens {
+		// Strip remaining FTS5 special chars to avoid syntax errors.
 		w = strings.Map(func(r rune) rune {
 			switch r {
-			case '"', '\'', '(', ')', '*', '^', '-', '+', ':', '.', '?', '!', ',', ';', '{', '}', '[', ']', '~', '&', '|', '@', '#', '$', '%', '/':
+			case '"', '(', ')', '*', '^', '-', '+', ':', '.', '?', '!', ',', ';', '{', '}', '[', ']', '~', '&', '|', '@', '#', '$', '%', '/':
 				return -1
 			}
 			return r
 		}, w)
-		if w != "" {
-			terms = append(terms, w+"*")
+		if len(w) < 2 {
+			continue // drop possessive "s", single letters, etc.
 		}
+		terms = append(terms, w+"*")
+	}
+	if len(terms) == 0 {
+		return ""
 	}
 	// OR semantics: any matching term ranks higher; all terms present = highest score.
 	return strings.Join(terms, " OR ")

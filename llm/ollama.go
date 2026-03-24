@@ -33,11 +33,7 @@ Rules:
 
 Example 1:
 Input: "Alice works at Google in Berlin since 2020."
-Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person", "description": "Alice is a professional who works at Google in Berlin"}, {"name": "Google", "entity_type": "Organization", "description": "Google is a technology company where Alice works"}, {"name": "Berlin", "entity_type": "Place", "description": "Berlin is the city where Alice works at Google"}]}
-
-Example 2 (German text, canonical forms):
-Input: "Der Chef der Deutschen Bahn sprach über Hamburgs Verkehrsprobleme."
-Output: {"extracted_entities": [{"name": "Deutsche Bahn", "entity_type": "Organization", "description": "Deutsche Bahn is a German railway company whose CEO discussed traffic problems"}, {"name": "Hamburg", "entity_type": "Place", "description": "Hamburg is a German city experiencing traffic problems"}]}`
+Output: {"extracted_entities": [{"name": "Alice", "entity_type": "Person", "description": "Alice is a professional who works at Google in Berlin"}, {"name": "Google", "entity_type": "Organization", "description": "Google is a technology company where Alice works"}, {"name": "Berlin", "entity_type": "Place", "description": "Berlin is the city where Alice works at Google"}]}`
 
 const edgeSystem = `Extract relationships between the listed entities. Output JSON only, no explanation.
 
@@ -46,7 +42,7 @@ Empty: {"edges": []}
 
 Rules:
 - relation_type: English SCREAMING_SNAKE_CASE always, even for non-English input text
-- WORKS_AT: employment/job ONLY — NOT for events, conferences, locations, or conflicts
+- WORKS_AT: paid employment/job ONLY — NOT for hobbies, interests, aspirations, events, or attended groups
 - fact: one complete English sentence about the relationship
 - valid_at / invalid_at: ISO 8601 date if mentioned in text, otherwise null
 - Only connect entities from the given list using their IDs
