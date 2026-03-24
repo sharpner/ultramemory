@@ -306,40 +306,22 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 
 	// ── 8. Leiden §4 Community Reports ────────────────────────────────────────
-	// Prepend LLM-generated community summaries for seed-entity communities.
-	// Provides global context that helps multi-hop and open-domain questions.
-	// Reports are generated at ingestion time and fetched here (no LLM at query time).
-	if len(seeds) > 0 {
-		communityMap, _ := db.CommunityMap(ctx, groupID)
-		seedCommunityIDs := map[int]bool{}
-		for _, s := range seeds {
-			if cid, ok := communityMap[s.UUID]; ok && cid >= 0 {
-				seedCommunityIDs[cid] = true
-			}
-		}
-		if len(seedCommunityIDs) > 0 {
-			cids := make([]int, 0, len(seedCommunityIDs))
-			for cid := range seedCommunityIDs {
-				cids = append(cids, cid)
-			}
-			reports, _ := db.CommunityReportsForIDs(ctx, groupID, cids)
-			// Prepend community reports as high-score context items.
-			// Score just above top result to ensure they appear first.
-			topScore := 0.0
-			if len(results) > 0 {
-				topScore = results[0].Score
-			}
-			for i, report := range reports {
-				results = append([]SearchResult{{
-					Type:  "community",
-					UUID:  "",
-					Title: "community context",
-					Body:  report,
-					Score: topScore + float64(len(reports)-i)*0.01,
-				}}, results...)
-			}
-		}
-	}
+	// Community report display DISABLED (v35 finding, 2026-03-24).
+	//
+	// Leiden §4 community reports work well for large, well-structured knowledge graphs
+	// (millions of entities, tight topical communities). For small conversational graphs
+	// (e.g. LoCoMo: ~89 entities, 1 dominant "everything" community), Louvain detection
+	// produces over-broad communities that generate context-polluting reports.
+	//
+	// Benchmark impact on LoCoMo conv-26 (v26-fresh.db, 199 QA pairs):
+	//   - LLM-generated prose report: -1.7% overall (-4.8% open-domain)
+	//   - Fact-only report:           -1.7% overall (-2.2% open-domain)
+	// Both formats hurt equally — the community itself is too diverse to summarise usefully.
+	//
+	// Community detection (Louvain §4) and report generation are still performed at
+	// ingestion time (stored in community_reports table). The community affinity signal
+	// (§4 RRF boost, above) continues to work. Only the context prepending is disabled.
+	// Re-enable when graph density and community quality improve.
 
 	return results, nil
 }

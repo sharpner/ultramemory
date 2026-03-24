@@ -30,7 +30,7 @@ func (d *DB) DetectCommunities(ctx context.Context, groupID string, resolution f
 	if err != nil {
 		return CommunityResult{}, fmt.Errorf("load entities: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var uuids []string
 	uuidToID := map[string]int64{}
@@ -70,7 +70,7 @@ func (d *DB) DetectCommunities(ctx context.Context, groupID string, resolution f
 	if err != nil {
 		return CommunityResult{}, fmt.Errorf("load edges: %w", err)
 	}
-	defer edgeRows.Close()
+	defer edgeRows.Close() //nolint:errcheck
 
 	for edgeRows.Next() {
 		var src, tgt string
@@ -113,7 +113,7 @@ func (d *DB) DetectCommunities(ctx context.Context, groupID string, resolution f
 	if err != nil {
 		return CommunityResult{}, fmt.Errorf("prepare: %w", err)
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck
 
 	for communityID, members := range communities {
 		for _, node := range members {
@@ -160,7 +160,7 @@ func (d *DB) CommunityMap(ctx context.Context, groupID string) (map[string]int, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	m := map[string]int{}
 	for rows.Next() {
@@ -182,7 +182,7 @@ func (d *DB) EntitiesInCommunity(ctx context.Context, groupID string, communityI
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var uuids []string
 	for rows.Next() {
@@ -214,7 +214,7 @@ func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMem
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	communityNames := map[int][]string{}
 	communityPersonCount := map[int]int{}
@@ -257,12 +257,12 @@ func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMem
 		for factRows.Next() {
 			var f string
 			if err := factRows.Scan(&f); err != nil {
-				factRows.Close()
+				factRows.Close() //nolint:errcheck
 				return nil, err
 			}
 			facts = append(facts, f)
 		}
-		factRows.Close()
+		factRows.Close() //nolint:errcheck
 		if err := factRows.Err(); err != nil {
 			return nil, err
 		}
@@ -301,7 +301,7 @@ func (d *DB) CommunityReportsForIDs(ctx context.Context, groupID string, communi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var reports []string
 	for rows.Next() {
 		var r string
