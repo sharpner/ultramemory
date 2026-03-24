@@ -556,25 +556,139 @@ Beispiel: Frage über Caroline → MAGMA findet Melanie → Melanies Episoden ü
 
 **Entscheidung**: Signal 3b deaktiviert. FTS + MAGMA-Traversal + Episode-Vector-Search reichen aus.
 
-### Iteration 29/30 — v29/v30: Entity Slot Fix (ausstehend)
-v29: Entity Slot Fix nur — Entities zählen nicht gegen Result-Limit.
-v30: Entity Slot Fix + Episodic Seeds + Entity-Vector deaktiviert.
-Beide laufen noch auf v26-fresh.db mit MAGMA Backfill (leider — Backfill war noch im Code).
+### Iteration 29 — v29: Entity Slot Fix (2026-03-23)
+Code: Entities zählen nicht gegen Result-Limit (contentCount trennt edges+episodes von entities).
+**Problem**: Signal 3b (MAGMA Backfill) war noch im Binary aktiv!
 
-### Iteration 31 — v31: Signal 3b revertiert + Temporal-Prompt-Fix (2026-03-23, läuft)
-Code:
-- Signal 3b (MAGMA Episode Backfill) deaktiviert
-- Temporal-Prompt-Fix: Für Would/Likely/hypothetische Fragen kurze Begründung aus Kontext
-  - Gold: "Likely no; though she likes reading, she wants to be a counselor" (12 Tokens)
-  - Vorher: Modell sagte "likely no" (2 Tokens) → tokenF1 ~17%
-  - Jetzt: Modell soll "Likely no, she wants to be a counselor" sagen → tokenF1 ~70%
-- Entity Slot Fix: Entities zählen nicht gegen Result-Limit
-- Episodic Seeds (Synapse §3.1): FTS-Episode-Hits → entity_episodes → MAGMA Seeds
-- Entity-Vector-Search deaktiviert (nach Entity-Slot-Fix inaktiv)
+| Category | F1 | EM | Delta vs v28 |
+|----------|-----|-----|-------------|
+| single-hop | 37.3% | 15.6% | +6.0% |
+| multi-hop | 35.9% | 2.7% | -5.2% |
+| temporal | 9.7% | 0.0% | +2.5% |
+| open-domain | 53.2% | 20.0% | -3.9% |
+| adversarial | 36.1% | 12.8% | 0.0% |
+| **OVERALL** | **40.5%** | **13.1%** | **-1.2%** |
 
-Basis: v26-fresh.db (gleiche DB wie v28/v29/v30)
+Duration: 36m20s
+Signal 3b aktiv → adversarial weiterhin deprimiert (36.1%). Kein sauberer Test der Entity-Slot-Änderung.
 
-**v31 Ergebnisse** ausstehend.
+### Iteration 30 — v30: Entity Slot Fix + Episodic Seeds + Entity-Vector deaktiviert (2026-03-23)
+Code: Alle drei Änderungen + Signal 3b leider noch aktiv.
+- Entity Slot Fix: entities zählen nicht gegen Limit
+- Episodic Seeds: FTS-Episode-Hits → entity_episodes → MAGMA Seeds (Synapse §3.1)
+- Entity-Vector-Search komplett deaktiviert (Entity-Slot-Fix macht Entity-Scores wirkungslos)
 
+| Category | F1 | EM | Delta vs v29 |
+|----------|-----|-----|-------------|
+| single-hop | 35.6% | 12.5% | -1.7% |
+| multi-hop | 37.5% | 5.4% | +1.6% |
+| temporal | 9.7% | 0.0% | 0.0% |
+| open-domain | 51.8% | 18.6% | -1.4% |
+| adversarial | 32.0% | 8.5% | **-4.1%** |
+| **OVERALL** | **39.1%** | **11.6%** | **-1.4%** |
 
+Duration: 32m51s
+Adversarial kollabiert weiter (-4.1%) — Signal 3b (MAGMA Backfill) ist der Haupttäter.
+Alle v29/v30 Messungen sind durch Signal 3b kontaminiert.
+
+### Iteration 31 — v31: Signal 3b deaktiviert + Temporal-Prompt-Fix (2026-03-23)
+Code: Signal 3b endlich deaktiviert + FEHLERHAFTER Temporal-Prompt-Versuch:
+- Entity Slot Fix + Episodic Seeds + Entity-Vector deaktiviert (wie v30)
+- Temporal-Prompt: "For Would/Likely questions, add brief reasoning from context"
+  - Absicht: Gold "Likely no; though she likes reading, she wants to be a counselor"
+  - Problem: gemma3:4b wendet Reasoning auf ALLE Fragen an, nicht nur Would/Likely
+
+| Category | F1 | EM | Delta vs v23 |
+|----------|-----|-----|-------------|
+| single-hop | 23.7% | 3.1% | **-12.9%** |
+| multi-hop | 43.2% | 5.4% | +1.0% |
+| temporal | 13.7% | 0.0% | +2.4% |
+| open-domain | 45.7% | 14.3% | **-11.0%** |
+| adversarial | 41.3% | 14.9% | -2.4% |
+| **OVERALL** | **38.6%** | **10.1%** | **-6.1%** |
+
+Duration: 29m14s
+**TEMPORAL-PROMPT-FIX SOFORT REVERTIERT.** gemma3:4b ignoriert bedingte Regeln — wendet Reasoning
+auf single-hop (-12.9%) und open-domain (-11%) an. Signal 3b deaktiviert war korrekt,
+aber der Prompt-Bug überdeckte den Effekt.
+
+**Entscheidung**: Temporal-Prompt komplett rückgängig. v32 = algorithmic fixes + original prompt.
+
+### Iteration 32 — v32: Entity Slot Fix + Episodic Seeds + Entity-Vector off + Signal 3b off + Original Prompt (2026-03-24, läuft)
+Code: Sauberer Test aller algorithmischen Verbesserungen OHNE Prompt-Änderungen:
+- Entity Slot Fix (contentCount nur edges+episodes)
+- Episodic Seeds (Synapse §3.1): FTS-episode-hits → entity_episodes → zusätzliche MAGMA Seeds
+- Entity-Vector-Search deaktiviert (entities sind keine Ausgabe in formatContext)
+- Signal 3b deaktiviert (v28 finding: -7.6% adversarial)
+- Original "Be extremely concise" Prompt von v23
+
+Basis: v26-fresh.db (gleiche DB wie v28–v31)
+
+| Category | F1 | EM | Delta vs v26-fresh |
+|----------|-----|-----|-------------------|
+| single-hop | 32.9% | 12.5% | -0.7% |
+| multi-hop | **42.8%** | 2.7% | **+3.1%** |
+| temporal | 7.2% | 0.0% | -2.2% |
+| open-domain | 51.1% | 18.6% | **-3.5%** |
+| adversarial | 42.2% | 14.9% | -1.8% |
+| **OVERALL** | **41.7%** | **12.6%** | **-1.3%** |
+
+Duration: 10m11s.
+
+**Ergebnis: Regression -1.3%.** Multi-hop profitiert (+3.1%), aber open-domain und adversarial bluten.
+Hauptverdacht: **Episodic Seeds** — FTS-episode-linked entities als MAGMA Seeds → unrelated graph traversal
+→ adversarial false positives + open-domain noise. Entity Slot Fix ist vermutlich neutral-positiv.
+
+**Nächste Isolation**: v33 ohne Episodic Seeds (Entity Slot Fix + keine Entity Vecs + kein Signal 3b).
+
+### Iteration 33 — v33: Episodic Seeds deaktiviert (2026-03-24)
+Code: Episodic Seeds aus v32 entfernt. Nur Entity Slot Fix + Entity Vector off + Signal 3b off.
+Basis: v26-fresh.db (mit 1 Community Report)
+
+| Category | F1 | EM | Delta vs v26-fresh | Delta vs v32 |
+|----------|-----|-----|-------------------|--------------|
+| single-hop | 35.2% | 12.5% | +1.6% | +2.3% |
+| multi-hop | 40.2% | 2.7% | +0.5% | -2.6% |
+| temporal | 7.2% | 0.0% | -2.2% | 0.0% |
+| open-domain | 52.6% | 20.0% | -2.0% | +1.5% |
+| adversarial | 44.9% | 17.0% | +0.9% | +2.7% |
+| **OVERALL** | **42.7%** | **13.6%** | **-0.3%** | **+1.0%** |
+
+Duration: 10m23s
+**Episodic Seeds waren Haupttäter** in v32. Ohne sie: -0.3% vs v26-fresh (Rauschen).
+Entity Slot Fix ist neutral auf v26-fresh.db (mit Community Report). Offene Frage: Schadet der Community Report?
+
+### Iteration 34 — v34: Community Report gelöscht — NEUES OVERALL-BEST (2026-03-24)
+Hypothesis: Der Community Report "Caroline, a member of the LGBTQ+ support group..." ist LLM-Halluzination?
+Test: Gleiche DB (v26-fresh), Community Report aus DB gelöscht → v26-noreport.db.
+
+**Ergebnis: Nein, KEIN Halluzinationsproblem — "Caroline attends the LGBTQ support group" ist eine echte Edge.**
+Problem ist strukturell: Community 0 hat 20+ Entities (LGBTQ+/Counseling/Musik gemischt) → jeder Report
+darüber ist Noise für spezifische Queries.
+
+| Category | F1 | EM | Delta vs v33 | Delta vs v26-fresh |
+|----------|-----|-----|-------------|-------------------|
+| single-hop | 36.6% | 12.5% | **+1.4%** | **+3.0%** |
+| multi-hop | 40.7% | 2.7% | +0.5% | +1.0% |
+| temporal | 6.5% | 0.0% | -0.7% | -2.9% |
+| open-domain | **57.4%** | 24.3% | **+4.8%** | **+2.8%** |
+| adversarial | 45.0% | 21.3% | +0.1% | +1.0% |
+| **OVERALL** | **44.7%** | **16.1%** | **+2.0%** | **+1.7%** |
+
+Duration: 10m18s. **NEUES OVERALL-BEST: 44.7% F1!**
+
+**Community Report entfernen: +2.0% overall, open-domain +4.8%!**
+Community 0 ist eine riesige Mixed-Community → jeder Report darüber polluiert spezifische Queries.
+Community Reports als Feature bleiben, aber Report-Generierung auf Fact-Only umgestellt
+(LLM-generierte Prosa halluziniert und fasst zu breit zusammen).
+
+### Iteration 35 — v35: Fact-Only Community Report (2026-03-24, läuft)
+Code: Community report durch direkte Edge Facts ersetzt (kein LLM):
+"People: Caroline, grandma, transgender teen. Key facts: Caroline attends the LGBTQ support group Caroline loves the lake sunrise ..."
+
+Hypothesis: Strukturierte Fakten statt Prosa reduzieren Noise? Oder ist Community 0
+selbst zu groß/divers für nützliche Reports?
+Basis: v35-test.db (v26-fresh.db + Fact-Only Report)
+
+**v35 Ergebnisse** ausstehend.
 
