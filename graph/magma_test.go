@@ -292,7 +292,9 @@ func TestDefaultMAGMAConfig(t *testing.T) {
 	if cfg.Lambda1 != 1.0 {
 		t.Errorf("Lambda1: want 1.0 (paper value), got %f", cfg.Lambda1)
 	}
-	if cfg.Lambda2 != 0.5 {
-		t.Errorf("Lambda2: want 0.5, got %f", cfg.Lambda2)
+	// Lambda2=0: entity embeddings are too similar (nomic-embed-text "A person named X" template)
+	// to discriminate between neighbors — setting 0 removes noise. v36 finding.
+	if cfg.Lambda2 != 0 {
+		t.Errorf("Lambda2: want 0 (v36: entity embeddings too similar, noise), got %f", cfg.Lambda2)
 	}
 }
