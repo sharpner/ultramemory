@@ -102,27 +102,11 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	// Episode→entity expansion helps when the question references a fact by object/event name
 	// rather than person name (e.g. "necklace" episode links to "grandma" entity → MAGMA seed).
 	seeds := ftsEntitySeeds(entFTS, 5)
-	if len(epFTS) > 0 {
-		epUUIDs := make([]string, 0, 3)
-		for i, ep := range epFTS {
-			if i >= 3 {
-				break
-			}
-			epUUIDs = append(epUUIDs, ep.UUID)
-		}
-		if epLinked, err := db.EntitiesForEpisodes(ctx, epUUIDs, groupID); err == nil {
-			existing := map[string]bool{}
-			for _, s := range seeds {
-				existing[s.UUID] = true
-			}
-			for _, e := range epLinked {
-				if !existing[e.UUID] && len(seeds) < 10 {
-					seeds = append(seeds, ActivatedNode{UUID: e.UUID, Name: e.Name, EntityType: e.EntityType})
-					existing[e.UUID] = true
-				}
-			}
-		}
-	}
+	// Episode→entity MAGMA seed expansion (Synapse §3.1 episodic bridging) — DISABLED (v32 finding).
+	// v32 benchmark: episodic seeds regressed open-domain -3.5%, adversarial -1.8% overall -1.3%.
+	// Root cause: top FTS episode hits link to diverse entities → MAGMA traverses from unrelated
+	// seeds → irrelevant edges pollute context for adversarial "unknown" and broad open-domain queries.
+	// Multi-hop slightly benefited (+3.1%), but net effect is negative. FTS entity seeds sufficient.
 	var magmaRanked []ActivatedNode
 	if len(seeds) > 0 {
 		expanded, err := SpreadMAGMA(ctx, db, seeds, query, qEmb, groupID, DefaultMAGMAConfig())
