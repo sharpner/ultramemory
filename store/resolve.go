@@ -49,13 +49,10 @@ func (d *DB) ResolveEntities(ctx context.Context, groupID string, cfg ResolveCon
 		for i := 0; i < len(group); i++ {
 			for j := i + 1; j < len(group); j++ {
 				// Token Jaccard on names is the primary signal.
-				// Embedding cosine CONFIRMS a name-based match, never triggers alone:
-				// entity embeddings ("A person named X") cluster all same-type entities
-				// close together, causing false merges (Mozart≈Bach) without this guard.
+				// Embedding cosine confirms a name-based match, never triggers alone.
 				nameSim := tokenJaccard(group[i].Name, group[j].Name)
 				if nameSim < 0.5 {
-					continue // Insufficient name overlap → different entities.
-					// Guards against embedding-based false merges (Mozart≈Bach, LGBTQ≈transgender).
+					continue
 				}
 				embSim := CosineSimilarity(group[i].Embedding, group[j].Embedding)
 				if embSim < cfg.Threshold && nameSim < cfg.Threshold {

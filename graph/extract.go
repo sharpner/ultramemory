@@ -256,8 +256,7 @@ func (e *Extractor) embedEpisode(ctx context.Context, uuid, content string) {
 }
 
 // entityEmbedText generates a sentence for embedding an entity name.
-// nomic-embed-text returns identical vectors for isolated proper nouns;
-// wrapping in a sentence gives the model enough context to differentiate.
+// Wrapping in a typed sentence produces better embeddings than bare names.
 func entityEmbedText(name, entityType string) string {
 	switch entityType {
 	case "Person":

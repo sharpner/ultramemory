@@ -69,23 +69,26 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		epByUUID[e.UUID] = e
 	}
 
-	// Entity vector search is disabled: entities are not rendered in context output
-	// (formatContext three-pass skips entity type), so entity RRF scores have no effect.
-	// Entity embeddings still serve MAGMA seeding via FTS entity hits.
-	//
-	// Edge vector search is disabled (v23 finding): introduces semantic near-misses
-	// (grandfather≈grandmother) that introduce noise for adversarial questions.
-	//
-	// Only episode vector search is live — episodes contain raw dialogue context.
-	var edgeVec []scored // kept for completeness; never populated
-	_ = edgeVec
-
+	// Entity vector search disabled: entities are not rendered in context output,
+	// so their RRF scores have no effect. Embeddings still serve MAGMA seeding.
+	var edgeVec []scored
 	var episodeVec []scored
 	if len(qEmb) > 0 {
+		allEdges, _ := db.AllEdgesWithEmbeddings(ctx, groupID)
+		for _, e := range allEdges {
+			if sim := store.CosineSimilarity(qEmb, e.Embedding); sim > 0.5 {
+				edgeVec = append(edgeVec, scored{e.UUID, sim})
+				edgByUUID[e.UUID] = e
+			}
+		}
+		sort.Slice(edgeVec, func(i, j int) bool { return edgeVec[i].score > edgeVec[j].score })
+		if len(edgeVec) > limit*2 {
+			edgeVec = edgeVec[:limit*2]
+		}
+
 		episodes, _ := db.AllEpisodesWithEmbeddings(ctx, groupID)
 		for _, e := range episodes {
-			sim := store.CosineSimilarity(qEmb, e.Embedding)
-			if sim > 0.3 {
+			if sim := store.CosineSimilarity(qEmb, e.Embedding); sim > 0.3 {
 				episodeVec = append(episodeVec, scored{e.UUID, sim})
 				epByUUID[e.UUID] = e
 			}
@@ -145,40 +148,18 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		rrf["ep:"+e.UUID] += 1.5 / float64(k+rank+1)
 	}
 
-	// Signal 2: Vector similarity ranks.
-	// Entity vector search disabled (entities skipped in output — inaktiv nach Entity-Slot-Fix).
-	// Edge vector search disabled (v23 finding: semantic near-misses introduce noise).
-	// Only episode vector search is live.
+	// Signal 2: Vector similarity ranks (edge + episode).
+	for rank, s := range edgeVec {
+		rrf["edg:"+s.uuid] += 0.5 / float64(k+rank+1)
+	}
 	for rank, s := range episodeVec {
 		rrf["ep:"+s.uuid] += 1.5 / float64(k+rank+1)
 	}
 
-	// Signal 3: MAGMA graph activation ranks (Synapse triple-signal fusion).
-	// MAGMA results are already sorted by activation score from SpreadMAGMA.
+	// Signal 3: MAGMA graph activation ranks.
 	for rank, a := range magmaRanked {
 		rrf["ent:"+a.UUID] += 1.0 / float64(k+rank+1)
 	}
-
-	// Signal 3c: MAGMA neighborhood expansion — DISABLED (v45 finding, 2026-03-24).
-	// v45 (all adjacent edges): -0.3% overall (open-domain +1.9%, adversarial -2.7%)
-	// v45b (both-endpoints filter): -1.1% overall (single-hop -5.8%)
-	// Both variants are within the ±3% noise floor; no reliable improvement.
-	// Root cause: graph is too sparse (88 edges, 89 entities) — MAGMA-activated edges mostly
-	// duplicate what FTS already finds. EdgesForEntities() stored in store/edges.go for future use.
-
-	// Signal 3b: MAGMA episode backfill — DISABLED (v28 finding).
-	// v28 benchmark vs v23: -7.6% adversarial, -5.3% single-hop, -3% overall.
-	// Linked episodes add attribution noise: MAGMA-discovered entities' episodes
-	// flood the context with indirectly-related dialogue, confusing the LLM.
-	// FTS + MAGMA + episode vector search is sufficient; backfill adds more noise than signal.
-
-	// Signal 5: Synapse §3.1 Selective Episode Backfill — DISABLED (v38 finding, 2026-03-24).
-	// v38 benchmark: -4.4% overall (41.0% vs 45.4% v37). Worst categories:
-	//   open-domain: -6.6%, adversarial: -5.8%, multi-hop: -2.4%
-	// Root cause: Entity-linked episodes add too much peripheral context for open-domain/adversarial
-	// queries — same flooding problem as v28 (MAGMA entities → episodes) and v32 (episode → MAGMA seeds).
-	// All three directions of episodic bridging (v28, v32, v38) have been tried and all regress.
-	// Conclusion: FTS + MAGMA + episode vector search is the stable 3-signal baseline.
 
 	// Signal 4: Community affinity (Leiden §4 — community-bounded retrieval).
 	// Entities and edges in the same community as seed entities get a boost.
@@ -319,24 +300,6 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 			sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
 		}
 	}
-
-	// ── 8. Leiden §4 Community Reports ────────────────────────────────────────
-	// Community report display DISABLED (v35 finding, 2026-03-24).
-	//
-	// Leiden §4 community reports work well for large, well-structured knowledge graphs
-	// (millions of entities, tight topical communities). For small conversational graphs
-	// (e.g. LoCoMo: ~89 entities, 1 dominant "everything" community), Louvain detection
-	// produces over-broad communities that generate context-polluting reports.
-	//
-	// Benchmark impact on LoCoMo conv-26 (v26-fresh.db, 199 QA pairs):
-	//   - LLM-generated prose report: -1.7% overall (-4.8% open-domain)
-	//   - Fact-only report:           -1.7% overall (-2.2% open-domain)
-	// Both formats hurt equally — the community itself is too diverse to summarise usefully.
-	//
-	// Community detection (Louvain §4) and report generation are still performed at
-	// ingestion time (stored in community_reports table). The community affinity signal
-	// (§4 RRF boost, above) continues to work. Only the context prepending is disabled.
-	// Re-enable when graph density and community quality improve.
 
 	return results, nil
 }

@@ -31,8 +31,6 @@ type MAGMAConfig struct {
 }
 
 // DefaultMAGMAConfig returns paper-aligned defaults (arxiv.org/abs/2601.03236).
-// BeamWidth=10 (paper default): v18 experiment showed BeamWidth=20 hurts adversarial
-// (-11%) more than it helps multi-hop (+4.4%). Restoring to paper default.
 func DefaultMAGMAConfig() MAGMAConfig {
 	return MAGMAConfig{
 		BeamWidth: 10,
@@ -41,11 +39,8 @@ func DefaultMAGMAConfig() MAGMAConfig {
 		MaxNodes:  200,
 		Decay:     0.5,
 		Lambda1:   1.0,
-		// Lambda2=0: entity embeddings use "A person named X" template format via nomic-embed-text,
-		// which produces near-identical vectors for all person entities. The cosine similarity
-		// between query and node embedding is therefore noise (constant ≈ 0.3-0.5 for all nodes).
-		// Setting Lambda2=0 removes this noisy signal, leaving traversal guided solely by
-		// intent-aware edge type alignment (Lambda1·phi). Test: v36.
+		// Lambda2=0: semantic affinity via edge vector search (separate RRF signal)
+		// proved more effective than embedding similarity inside MAGMA traversal.
 		Lambda2: 0,
 	}
 }
@@ -214,7 +209,9 @@ func applyMAGMADefaults(cfg *MAGMAConfig) {
 	if cfg.Lambda1 == 0 {
 		cfg.Lambda1 = 1.0
 	}
-	if cfg.Lambda2 == 0 {
+	// Lambda2: negative means "use default" (0.5). Zero is a valid explicit value
+	// (disables semantic affinity). Do NOT treat 0 as unset.
+	if cfg.Lambda2 < 0 {
 		cfg.Lambda2 = 0.5
 	}
 	// Threshold: 0 means "no output filtering" — do not fill with a default.

@@ -5,11 +5,11 @@ Portable knowledge graph builder for local documents. Single Go binary, no cloud
 ## Dependencies
 
 - **Go** (build time)
-- **Ollama** (runtime) with `gemma3:4b` and `nomic-embed-text` pulled
+- **Ollama** (runtime) with `gemma3:4b` and `mxbai-embed-large` pulled
 
 ```bash
 ollama pull gemma3:4b
-ollama pull nomic-embed-text
+ollama pull mxbai-embed-large
 ```
 
 By default Ollama keeps models loaded in VRAM indefinitely. Set a keep-alive timeout to free GPU memory when idle:

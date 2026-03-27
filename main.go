@@ -37,7 +37,7 @@ const (
 	defaultDB             = "memory-local.db"
 	defaultOllama         = "http://localhost:11434"
 	defaultExtractModel   = "gemma3:4b"
-	defaultEmbeddingModel = "nomic-embed-text"
+	defaultEmbeddingModel = "mxbai-embed-large"
 	defaultGroup          = "default"
 	pollInterval          = 200 * time.Millisecond
 )

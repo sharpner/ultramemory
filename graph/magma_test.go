@@ -292,9 +292,11 @@ func TestDefaultMAGMAConfig(t *testing.T) {
 	if cfg.Lambda1 != 1.0 {
 		t.Errorf("Lambda1: want 1.0 (paper value), got %f", cfg.Lambda1)
 	}
-	// Lambda2=0: entity embeddings are too similar (nomic-embed-text "A person named X" template)
-	// to discriminate between neighbors — setting 0 removes noise. v36 finding.
+	// Lambda2=0: MAGMA traversal uses intent-edge alignment only (Lambda1·phi).
+	// Semantic affinity (Lambda2·cos_sim) showed no measurable improvement in v50 benchmark
+	// even with mxbai-embed-large. Edge vector search (separate RRF signal) is the better
+	// way to leverage improved embeddings.
 	if cfg.Lambda2 != 0 {
-		t.Errorf("Lambda2: want 0 (v36: entity embeddings too similar, noise), got %f", cfg.Lambda2)
+		t.Errorf("Lambda2: want 0 (semantic signal via edge vector RRF, not MAGMA), got %f", cfg.Lambda2)
 	}
 }
