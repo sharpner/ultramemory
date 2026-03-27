@@ -206,7 +206,7 @@ func applyMAGMADefaults(cfg *MAGMAConfig) {
 	if cfg.Decay == 0 {
 		cfg.Decay = 0.5
 	}
-	if cfg.Lambda1 == 0 {
+	if cfg.Lambda1 < 0 {
 		cfg.Lambda1 = 1.0
 	}
 	// Lambda2: negative means "use default" (0.5). Zero is a valid explicit value

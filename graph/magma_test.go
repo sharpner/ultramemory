@@ -300,3 +300,25 @@ func TestDefaultMAGMAConfig(t *testing.T) {
 		t.Errorf("Lambda2: want 0 (semantic signal via edge vector RRF, not MAGMA), got %f", cfg.Lambda2)
 	}
 }
+
+func TestApplyMAGMADefaults_ExplicitZero(t *testing.T) {
+	cfg := MAGMAConfig{Lambda1: 0, Lambda2: 0}
+	applyMAGMADefaults(&cfg)
+	if cfg.Lambda1 != 0 {
+		t.Errorf("Lambda1=0 must be preserved, got %f", cfg.Lambda1)
+	}
+	if cfg.Lambda2 != 0 {
+		t.Errorf("Lambda2=0 must be preserved, got %f", cfg.Lambda2)
+	}
+}
+
+func TestApplyMAGMADefaults_NegativeFillsDefault(t *testing.T) {
+	cfg := MAGMAConfig{Lambda1: -1, Lambda2: -1}
+	applyMAGMADefaults(&cfg)
+	if cfg.Lambda1 != 1.0 {
+		t.Errorf("Lambda1<0 must fill default 1.0, got %f", cfg.Lambda1)
+	}
+	if cfg.Lambda2 != 0.5 {
+		t.Errorf("Lambda2<0 must fill default 0.5, got %f", cfg.Lambda2)
+	}
+}
