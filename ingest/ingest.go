@@ -31,6 +31,7 @@ type Walker struct {
 	pdftotextBin string // optional: poppler pdftotext
 	pdftoppmBin  string // optional: poppler pdftoppm (needed for OCR fallback)
 	tesseractBin string // optional: Tesseract OCR
+	detexBin     string // optional: opendetex for LaTeX stripping
 	ocrClient    *llm.Client // optional: gemma3 OCR fallback
 }
 
@@ -40,6 +41,7 @@ func New(db *store.DB, groupID string) *Walker {
 	w.pdftotextBin, _ = exec.LookPath("pdftotext")
 	w.pdftoppmBin, _ = exec.LookPath("pdftoppm")
 	w.tesseractBin, _ = exec.LookPath("tesseract")
+	w.detexBin, _ = exec.LookPath("detex")
 
 	if w.pdftotextBin == "" {
 		slog.Warn("pdftotext not found — digital PDFs will be skipped (install poppler)")
@@ -86,6 +88,14 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 			text, err := w.extractPDF(ctx, path)
 			if err != nil {
 				slog.Warn("skip pdf", "path", path, "err", err)
+				return nil
+			}
+			return w.enqueueChunks(ctx, text, path, &total)
+		}
+		if isTeX(path) {
+			text, err := w.sanitizeTeX(ctx, path)
+			if err != nil {
+				slog.Warn("skip tex", "path", path, "err", err)
 				return nil
 			}
 			return w.enqueueChunks(ctx, text, path, &total)
@@ -273,13 +283,17 @@ func isText(path string) bool {
 		".ts": true, ".tsx": true, ".js": true, ".jsx": true,
 		".py": true, ".rs": true, ".sql": true, ".env": true,
 		".proto": true, ".graphql": true, ".html": true, ".css": true,
-		".tex": true, ".bib": true,
+		".bib": true,
 	}
 	return ok[ext]
 }
 
 func isPDF(path string) bool {
 	return strings.ToLower(filepath.Ext(path)) == ".pdf"
+}
+
+func isTeX(path string) bool {
+	return strings.ToLower(filepath.Ext(path)) == ".tex"
 }
 
 func extractPDFText(ctx context.Context, bin, path string) (string, error) {
