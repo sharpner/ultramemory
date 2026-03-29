@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // JobType constants.
@@ -27,41 +28,30 @@ func (d *DB) PushJob(ctx context.Context, jobType, payload string) error {
 	return err
 }
 
-// NextJob atomically claims the oldest pending job.
+// NextJob atomically claims the oldest pending job using UPDATE...RETURNING.
+// Single statement — no transaction needed, minimal lock contention.
 // Returns nil, nil when the queue is empty.
 func (d *DB) NextJob(ctx context.Context) (*Job, error) {
-	tx, err := d.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
 	var job Job
-	err = tx.QueryRowContext(ctx,
-		`SELECT id, type, payload FROM jobs
-		 WHERE status = 'pending'
-		 ORDER BY created_at ASC
-		 LIMIT 1`,
+	err := d.sql.QueryRowContext(ctx, `
+		UPDATE jobs
+		SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM jobs
+			WHERE status = 'pending'
+			ORDER BY created_at ASC
+			LIMIT 1
+		)
+		RETURNING id, type, payload`,
 	).Scan(&job.ID, &job.Type, &job.Payload)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query job: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx,
-		`UPDATE jobs
-		 SET status = 'processing', updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`,
-		job.ID,
-	)
-	if err != nil {
 		return nil, fmt.Errorf("claim job: %w", err)
 	}
-
-	return &job, tx.Commit()
+	return &job, nil
 }
 
 // CompleteJob marks a job as done.
@@ -86,6 +76,22 @@ func (d *DB) FailJob(ctx context.Context, id int64, reason string) error {
 		reason, id,
 	)
 	return err
+}
+
+// RecoverStaleJobs resets jobs stuck in 'processing' longer than staleAfter
+// back to 'pending'. This recovers from worker crashes where FailJob was never called.
+func (d *DB) RecoverStaleJobs(ctx context.Context, staleAfter time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-staleAfter).UTC().Format("2006-01-02 15:04:05")
+	res, err := d.sql.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+		WHERE status = 'processing' AND updated_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover stale jobs: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 // QueueStats returns pending/processing/done/failed counts.

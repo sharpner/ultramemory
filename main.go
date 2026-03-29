@@ -78,13 +78,20 @@ func main() {
 
 	switch os.Args[1] {
 	case "ingest":
-		if len(os.Args) < 3 {
-			fatalf("usage: memory-local ingest <path>")
+		fs := flag.NewFlagSet("ingest", flag.ExitOnError)
+		source := fs.String("source", "", "source label (e.g. arXiv URL) instead of file path")
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fatalf("usage: ultramemory ingest [-source URL] <path>")
 		}
 		must(client.Ping(ctx), "ping ollama")
-		n, err := ingest.New(db, groupID).WithOCR(client).Walk(ctx, os.Args[2])
+		w := ingest.New(db, groupID).WithOCR(client)
+		if *source != "" {
+			w = w.WithSource(*source)
+		}
+		n, err := w.Walk(ctx, fs.Arg(0))
 		must(err, "walk")
-		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks from %s\n", n, os.Args[2])
+		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks from %s\n", n, fs.Arg(0))
 
 	case "worker":
 		must(client.Ping(ctx), "ping ollama")
@@ -95,8 +102,11 @@ func main() {
 		runWorker(ctx, db, client, resolveThreshold)
 
 	case "run":
-		if len(os.Args) < 3 {
-			fatalf("usage: memory-local run <path>")
+		fs := flag.NewFlagSet("run", flag.ExitOnError)
+		source := fs.String("source", "", "source label (e.g. arXiv URL) instead of file path")
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			fatalf("usage: ultramemory run [-source URL] <path>")
 		}
 		must(client.Ping(ctx), "ping ollama")
 
@@ -105,7 +115,11 @@ func main() {
 			slog.Warn("warmup failed", "err", err)
 		}
 
-		n, err := ingest.New(db, groupID).WithOCR(client).Walk(ctx, os.Args[2])
+		w := ingest.New(db, groupID).WithOCR(client)
+		if *source != "" {
+			w = w.WithSource(*source)
+		}
+		n, err := w.Walk(ctx, fs.Arg(0))
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
 		runWorker(ctx, db, client, resolveThreshold)
@@ -194,12 +208,21 @@ func main() {
 	}
 }
 
+const staleJobTimeout = 5 * time.Minute
+
 // runWorker polls the SQLite queue and processes jobs with max 1 concurrent LLM call.
 func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThreshold float64) {
 	ext := graph.New(db, client, resolveThreshold)
 	concurrency := runtime.NumCPU()
 	if concurrency > 4 {
 		concurrency = 4
+	}
+
+	// Recover jobs orphaned by a previous crash before starting.
+	if n, err := db.RecoverStaleJobs(ctx, staleJobTimeout); err != nil {
+		slog.Error("recover stale jobs", "err", err)
+	} else if n > 0 {
+		slog.Info("recovered stale jobs", "count", n)
 	}
 
 	// Worker pool — but LLM semaphore in Extractor limits actual LLM calls to 1.
@@ -226,6 +249,7 @@ func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThr
 	defer ticker.Stop()
 
 	lastLog := time.Now()
+	lastRecover := time.Now()
 	processed := 0
 
 	for {
@@ -235,6 +259,16 @@ func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThr
 			fmt.Fprintf(os.Stderr, "\n✓ Worker stopped. Processed %d chunks.\n", processed)
 			return
 		case <-ticker.C:
+			// Periodically recover stale jobs in case a worker goroutine panicked.
+			if time.Since(lastRecover) > staleJobTimeout {
+				if n, err := db.RecoverStaleJobs(ctx, staleJobTimeout); err != nil {
+					slog.Error("recover stale jobs", "err", err)
+				} else if n > 0 {
+					slog.Info("recovered stale jobs", "count", n)
+				}
+				lastRecover = time.Now()
+			}
+
 			for {
 				job, err := db.NextJob(ctx)
 				if err != nil {
@@ -371,8 +405,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `memory-local — local knowledge graph (SQLite + Ollama)
 
 Commands:
-  run     <path>   ingest directory + start worker (all-in-one)
-  ingest  <path>   queue all text files for processing
+  run     <path>   ingest directory + start worker (all-in-one)  [-source URL]
+  ingest  <path>   queue all text files for processing         [-source URL]
   worker           process queued jobs (blocking)
   search  <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
   resolve          merge near-duplicate entities (flags: -dry-run, -threshold 0.85)

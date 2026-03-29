@@ -8,17 +8,16 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"unicode"
 
 	_ "modernc.org/sqlite"
 )
 
+// PRAGMAs are set via connection string so they apply to every pool connection.
+// Schema only contains DDL.
 const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS episodes (
 	uuid        TEXT PRIMARY KEY,
@@ -136,12 +135,13 @@ type DB struct {
 }
 
 // Open opens (or creates) the SQLite database at path.
+// PRAGMAs are set via connection string so every pooled connection inherits them.
 func Open(path string) (*DB, error) {
-	conn, err := sql.Open("sqlite", path)
+	dsn := buildDSN(path)
+	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// WAL + multiple conns: reads proceed while the worker inserts.
 	conn.SetMaxOpenConns(4)
 	conn.SetMaxIdleConns(2)
 
@@ -151,6 +151,17 @@ func Open(path string) (*DB, error) {
 	// Best-effort migrations — ALTER TABLE fails silently if column exists.
 	_, _ = conn.ExecContext(context.Background(), migrations)
 	return &DB{sql: conn}, nil
+}
+
+// buildDSN constructs a modernc.org/sqlite connection string with PRAGMAs
+// that apply to every connection in the pool, not just the first.
+func buildDSN(path string) string {
+	params := url.Values{}
+	params.Add("_pragma", "journal_mode(WAL)")
+	params.Add("_pragma", "busy_timeout(5000)")
+	params.Add("_pragma", "synchronous(NORMAL)")
+	params.Add("_pragma", "foreign_keys(ON)")
+	return "file:" + path + "?" + params.Encode()
 }
 
 // Close closes the database.
