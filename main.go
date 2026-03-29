@@ -417,7 +417,7 @@ Environment:
   MEMORY_DB                  path to SQLite file  (default: memory-local.db)
   MEMORY_OLLAMA              Ollama base URL      (default: http://localhost:11434)
   MEMORY_MODEL               extraction model     (default: gemma3:4b)
-  MEMORY_EMBED_MODEL         embedding model      (default: nomic-embed-text)
+  MEMORY_EMBED_MODEL         embedding model      (default: mxbai-embed-large)
   MEMORY_GROUP               namespace/group      (default: default)
   MEMORY_RESOLVE_THRESHOLD   resolve similarity   (default: 0.92)`)
 }

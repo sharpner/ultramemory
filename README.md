@@ -5,11 +5,11 @@ Portable knowledge graph builder for local documents. Single Go binary, no cloud
 ## Dependencies
 
 - **Go** (build time)
-- **Ollama** (runtime) with `gemma3:4b` and `mxbai-embed-large` pulled
+- **Ollama** (runtime) with these models pulled:
 
 ```bash
-ollama pull gemma3:4b
-ollama pull mxbai-embed-large
+ollama pull gemma3:4b          # entity/edge extraction
+ollama pull mxbai-embed-large  # embeddings (1024-dim)
 ```
 
 By default Ollama keeps models loaded in VRAM indefinitely. Set a keep-alive timeout to free GPU memory when idle:
@@ -43,6 +43,17 @@ Or build from source:
 go build -o ultramemory .
 ```
 
+## Supported formats
+
+| Format | Extensions | Method |
+|--------|-----------|--------|
+| Text / Markup | `.txt`, `.md`, `.html`, `.css` | direct UTF-8 read |
+| Code | `.go`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.rs`, `.sh` | direct UTF-8 read |
+| Data / Config | `.json`, `.yaml`, `.yml`, `.toml`, `.env`, `.sql`, `.graphql`, `.proto` | direct UTF-8 read |
+| LaTeX / BibTeX | `.tex`, `.bib` | direct UTF-8 read |
+| PDF (digital) | `.pdf` | `pdftotext` (poppler) |
+| PDF (scanned) | `.pdf` | `tesseract` OCR, gemma3 vision fallback |
+
 ## Usage
 
 ```bash
@@ -52,6 +63,10 @@ ultramemory run ./my-docs
 # Or separately:
 ultramemory ingest ./my-docs   # enqueue files into SQLite job queue
 ultramemory worker             # process queue (runs until Ctrl+C)
+
+# Ingest with custom source label (e.g. arXiv URL)
+ultramemory ingest -source "https://arxiv.org/abs/2511.01815" ./paper/
+ultramemory run -source "https://arxiv.org/abs/2511.01815" ./paper/
 
 # Search the graph
 ultramemory search "Alice Schmidt TechCorp"
@@ -71,7 +86,7 @@ ultramemory status
 | `MEMORY_DB`        | `memory-local.db`         | SQLite database path             |
 | `MEMORY_OLLAMA`    | `http://localhost:11434`  | Ollama base URL                  |
 | `MEMORY_MODEL`     | `gemma3:4b`               | Entity/edge extraction model     |
-| `MEMORY_EMBED_MODEL` | `nomic-embed-text`      | Embedding model                  |
+| `MEMORY_EMBED_MODEL` | `mxbai-embed-large`     | Embedding model (1024-dim)       |
 | `MEMORY_GROUP`     | `default`                 | Namespace for graph isolation    |
 | `MEMORY_RESOLVE_THRESHOLD` | `0.92`          | Cosine similarity threshold for entity deduplication (0–1) |
 
@@ -130,7 +145,7 @@ ultramemory status -format json
 
 1. **Ingest**: Files are chunked (1500 chars, 150 overlap) and enqueued as SQLite jobs
 2. **Extract**: gemma3:4b extracts named entities and relationships from each chunk
-3. **Embed**: nomic-embed-text generates 768-dim vectors for semantic search
+3. **Embed**: mxbai-embed-large generates 1024-dim vectors for semantic search
 4. **Search**: Hybrid FTS5 + cosine similarity fused via RRF, then extended by MAGMA graph traversal
 
 ### Search pipeline detail

@@ -257,7 +257,7 @@ func TestIntegrationEmbedding(t *testing.T) {
 		t.Fatal("empty embedding")
 	}
 	t.Logf("embedding dim=%d", len(vec))
-	// nomic-embed-text produces 768-dim vectors
+	// mxbai-embed-large produces 1024-dim vectors
 	if len(vec) < 100 {
 		t.Errorf("suspiciously small embedding: dim=%d", len(vec))
 	}
