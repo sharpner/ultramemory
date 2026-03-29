@@ -33,6 +33,10 @@ import (
 	"github.com/sharpner/ultramemory/store"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+// Falls back to "(dev)" for go run / untagged builds.
+var version = "(dev)"
+
 const (
 	defaultDB             = "memory-local.db"
 	defaultOllama         = "http://localhost:11434"
@@ -46,6 +50,10 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
+	}
+	if os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version" {
+		fmt.Println("ultramemory " + version)
+		return
 	}
 
 	// Config from env (overridable).
@@ -402,9 +410,8 @@ func printResolveResult(r store.ResolveResult, dryRun bool) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `memory-local — local knowledge graph (SQLite + Ollama)
-
-Commands:
+	fmt.Fprintf(os.Stderr, "ultramemory %s — local knowledge graph (SQLite + Ollama)\n\n", version)
+	fmt.Fprintln(os.Stderr, `Commands:
   run     <path>   ingest directory + start worker (all-in-one)  [-source URL]
   ingest  <path>   queue all text files for processing         [-source URL]
   worker           process queued jobs (blocking)
