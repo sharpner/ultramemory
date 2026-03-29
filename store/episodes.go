@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -52,27 +54,33 @@ func (d *DB) UpsertEpisode(ctx context.Context, ep Episode) error {
 // FirstEntitySource returns the source file of the first episode linked to an entity.
 func (d *DB) FirstEntitySource(ctx context.Context, entityUUID, groupID string) string {
 	var src string
-	d.sql.QueryRowContext(ctx, `
+	err := d.sql.QueryRowContext(ctx, `
 		SELECT ep.source FROM episodes ep
 		JOIN entity_episodes ee ON ee.episode_uuid = ep.uuid
 		WHERE ee.entity_uuid = ? AND ep.group_id = ?
 		LIMIT 1`,
 		entityUUID, groupID,
-	).Scan(&src) //nolint:errcheck
+	).Scan(&src)
+	if err != nil && err != sql.ErrNoRows {
+		slog.Warn("FirstEntitySource query failed", "entity", entityUUID, "err", err)
+	}
 	return src
 }
 
 // FirstEdgeSource returns the source file of the first episode linked to an edge.
 func (d *DB) FirstEdgeSource(ctx context.Context, edgeUUID string) string {
 	var src string
-	d.sql.QueryRowContext(ctx, `
+	err := d.sql.QueryRowContext(ctx, `
 		SELECT ep.source FROM episodes ep
 		WHERE ep.uuid IN (
 			SELECT value FROM json_each((SELECT episodes FROM edges WHERE uuid = ?))
 		)
 		LIMIT 1`,
 		edgeUUID,
-	).Scan(&src) //nolint:errcheck
+	).Scan(&src)
+	if err != nil && err != sql.ErrNoRows {
+		slog.Warn("FirstEdgeSource query failed", "edge", edgeUUID, "err", err)
+	}
 	return src
 }
 

@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -46,7 +47,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	// ── 2. Vector search ──────────────────────────────────────────────────────
 	qEmb, err := client.Embed(ctx, query)
 	if err != nil {
-		// Non-fatal: fall back to FTS-only.
+		slog.Warn("query embedding failed, falling back to FTS-only search", "err", err)
 		qEmb = nil
 	}
 
@@ -74,7 +75,10 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	var edgeVec []scored
 	var episodeVec []scored
 	if len(qEmb) > 0 {
-		allEdges, _ := db.AllEdgesWithEmbeddings(ctx, groupID)
+		allEdges, err := db.AllEdgesWithEmbeddings(ctx, groupID)
+		if err != nil {
+			slog.Warn("edge vector search unavailable", "err", err)
+		}
 		for _, e := range allEdges {
 			if sim := store.CosineSimilarity(qEmb, e.Embedding); sim > 0.5 {
 				edgeVec = append(edgeVec, scored{e.UUID, sim})
@@ -86,7 +90,10 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 			edgeVec = edgeVec[:limit*2]
 		}
 
-		episodes, _ := db.AllEpisodesWithEmbeddings(ctx, groupID)
+		episodes, err := db.AllEpisodesWithEmbeddings(ctx, groupID)
+		if err != nil {
+			slog.Warn("episode vector search unavailable", "err", err)
+		}
 		for _, e := range episodes {
 			if sim := store.CosineSimilarity(qEmb, e.Embedding); sim > 0.3 {
 				episodeVec = append(episodeVec, scored{e.UUID, sim})
@@ -163,7 +170,10 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 
 	// Signal 4: Community affinity (Leiden §4 — community-bounded retrieval).
 	// Entities and edges in the same community as seed entities get a boost.
-	communityMap, _ := db.CommunityMap(ctx, groupID)
+	communityMap, err := db.CommunityMap(ctx, groupID)
+	if err != nil {
+		slog.Warn("community map unavailable", "err", err)
+	}
 	if len(communityMap) > 0 && len(seeds) > 0 {
 		seedCommunities := map[int]bool{}
 		for _, s := range seeds {

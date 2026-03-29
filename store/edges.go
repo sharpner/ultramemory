@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -23,14 +24,16 @@ type Edge struct {
 // Deduplicates by (source_uuid, target_uuid, name, group_id).
 func (d *DB) UpsertEdge(ctx context.Context, e Edge) error {
 	var existing string
-	_ = d.sql.QueryRowContext(ctx,
+	err := d.sql.QueryRowContext(ctx,
 		`SELECT uuid FROM edges
 		 WHERE source_uuid = ? AND target_uuid = ? AND name = ? AND group_id = ?
 		 LIMIT 1`,
 		e.SourceUUID, e.TargetUUID, e.Name, e.GroupID,
 	).Scan(&existing)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("lookup edge: %w", err)
+	}
 
-	var err error
 	var embBlob []byte
 	if len(e.Embedding) > 0 {
 		embBlob = EncodeEmbedding(e.Embedding)

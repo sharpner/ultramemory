@@ -73,7 +73,8 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 	total := 0
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip unreadable
+			slog.Warn("skip unreadable path", "path", path, "err", err)
+			return nil
 		}
 		if d.IsDir() {
 			if path == absRoot {
@@ -236,11 +237,14 @@ func (w *Walker) enqueueChunks(ctx context.Context, text, source string, total *
 		if len(c) < 50 {
 			continue
 		}
-		payload, _ := json.Marshal(graph.IngestPayload{
+		payload, err := json.Marshal(graph.IngestPayload{
 			Content: c,
 			Source:  source,
 			GroupID: w.groupID,
 		})
+		if err != nil {
+			return fmt.Errorf("marshal payload: %w", err)
+		}
 		if err := w.db.PushJob(ctx, store.JobTypeIngest, string(payload)); err != nil {
 			return fmt.Errorf("push job: %w", err)
 		}

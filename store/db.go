@@ -148,20 +148,39 @@ func Open(path string) (*DB, error) {
 	if _, err := conn.ExecContext(context.Background(), schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	// Best-effort migrations — ALTER TABLE fails silently if column exists.
-	_, _ = conn.ExecContext(context.Background(), migrations)
+	if err := runMigrations(conn); err != nil {
+		return nil, err
+	}
 	return &DB{sql: conn}, nil
 }
 
 // buildDSN constructs a modernc.org/sqlite connection string with PRAGMAs
 // that apply to every connection in the pool, not just the first.
+// Path is escaped to handle spaces, '?', '#' etc.
 func buildDSN(path string) string {
 	params := url.Values{}
 	params.Add("_pragma", "journal_mode(WAL)")
 	params.Add("_pragma", "busy_timeout(5000)")
 	params.Add("_pragma", "synchronous(NORMAL)")
 	params.Add("_pragma", "foreign_keys(ON)")
-	return "file:" + path + "?" + params.Encode()
+	return "file:" + url.PathEscape(path) + "?" + params.Encode()
+}
+
+// runMigrations executes each ALTER TABLE statement individually.
+// "duplicate column" errors are expected (column already added) and ignored;
+// all other errors are fatal.
+func runMigrations(conn *sql.DB) error {
+	for _, m := range strings.Split(migrations, ";") {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		_, err := conn.ExecContext(context.Background(), m)
+		if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migration %q: %w", m, err)
+		}
+	}
+	return nil
 }
 
 // Close closes the database.

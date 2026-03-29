@@ -147,11 +147,14 @@ func pickCanonical(ctx context.Context, d *DB, cluster []Entity, groupID string)
 // edgeCount returns the number of edges where uuid appears as source or target.
 func edgeCount(ctx context.Context, d *DB, uuid, groupID string) int {
 	var n int
-	_ = d.sql.QueryRowContext(ctx,
+	err := d.sql.QueryRowContext(ctx,
 		`SELECT count(*) FROM edges
 		 WHERE (source_uuid = ? OR target_uuid = ?) AND group_id = ?`,
 		uuid, uuid, groupID,
 	).Scan(&n)
+	if err != nil {
+		slog.Warn("edgeCount query failed, defaulting to 0", "uuid", uuid, "err", err)
+	}
 	return n
 }
 
