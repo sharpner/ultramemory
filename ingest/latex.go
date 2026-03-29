@@ -2,36 +2,43 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
-// LaTeX macro patterns compiled once.
+// LaTeX patterns compiled once at package init.
 var (
-	// Matches \newcommand{\Name}{...body...} — name is captured, body extracted by balancedBrace.
+	// \newcommand{\Name}{...body...} — name captured, body extracted by extractBraced.
 	reMacroDef = regexp.MustCompile(`\\(?:re)?newcommand\{\\(\w+)\}(?:\[\d+\])?`)
 
 	// \texttt{X}, \textbf{X}, \textit{X}, \emph{X}, \textsc{X}, \text{X} → X
 	reFormatCmd = regexp.MustCompile(`\\(?:texttt|textbf|textit|textsc|emph|text)\{([^}]*)\}`)
 
-	// Cite-key leaks: barewords like "smith2024deep" or "yuan2024kvcache..."
-	reCiteKey = regexp.MustCompile(`\b[a-z]{2,20}\d{4}[a-z]{2,40}\b`)
+	// Cite-key leaks: barewords like "smith2024deeplearning" (min 3+4+4 chars to avoid false positives).
+	reCiteKey = regexp.MustCompile(`\b[a-z]{3,20}\d{4}[a-z]{4,40}\b`)
 
-	// Multiple blank lines → single blank line
-	reBlankLines = regexp.MustCompile(`\n{3,}`)
-
-	// Orphan punctuation from removed macros: "We present , a" → "We present a"
+	reBlankLines  = regexp.MustCompile(`\n{3,}`)
 	reOrphanComma = regexp.MustCompile(` , `)
 	reOrphanColon = regexp.MustCompile(` : `)
+
+	// fallbackStrip static patterns — compiled once.
+	reDisplayMathBracket = regexp.MustCompile(`(?s)\\\[.*?\\]`)
+	reDisplayMathDollar  = regexp.MustCompile(`(?s)\$\$.*?\$\$`)
+	reInlineMath         = regexp.MustCompile(`\$[^$]+?\$`)
+	reCiteRef            = regexp.MustCompile(`\\(?:citep?|citet|ref|cref|label|eqref)\{[^}]*\}`)
+	reGenericCommand     = regexp.MustCompile(`\\[a-zA-Z]+`)
 )
 
 // sanitizeTeX converts a .tex file to clean prose via:
 // 1. Resolve custom macros from companion .sty files
-// 2. Run detex to strip LaTeX commands
+// 2. Run detex (with Go fallback) to strip LaTeX commands
 // 3. Clean up residual artifacts
 func (w *Walker) sanitizeTeX(ctx context.Context, path string) (string, error) {
 	raw, err := os.ReadFile(path)
@@ -45,21 +52,26 @@ func (w *Walker) sanitizeTeX(ctx context.Context, path string) (string, error) {
 	macros := parseMacros(dir)
 	text = applyMacros(text, macros)
 
-	// Step 2: run detex if available.
-	if w.detexBin != "" {
-		cleaned, err := w.runDetex(ctx, text)
-		if err != nil {
-			return "", fmt.Errorf("detex: %w", err)
-		}
-		text = cleaned
-	} else {
-		// Fallback: lightweight Go-only stripping (no detex installed).
-		text = fallbackStrip(text)
-	}
+	// Step 2: strip LaTeX. Try detex first, fall back to Go stripper on failure.
+	text = w.stripLaTeX(ctx, text)
 
 	// Step 3: clean up residual noise.
 	text = cleanDetexOutput(text)
 	return text, nil
+}
+
+// stripLaTeX runs detex if available, falling back to Go stripper if detex
+// is missing or fails at runtime.
+func (w *Walker) stripLaTeX(ctx context.Context, text string) string {
+	if w.detexBin == "" {
+		return fallbackStrip(text)
+	}
+	cleaned, err := w.runDetex(ctx, text)
+	if err != nil {
+		slog.Warn("detex failed, using fallback stripper", "err", err)
+		return fallbackStrip(text)
+	}
+	return cleaned
 }
 
 // parseMacros scans all .sty and .tex files in dir for \newcommand definitions.
@@ -73,12 +85,12 @@ func parseMacros(dir string) map[string]string {
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
+			slog.Warn("skip macro file", "path", f, "err", err)
 			continue
 		}
 		content := string(data)
 		for _, loc := range reMacroDef.FindAllStringSubmatchIndex(content, -1) {
 			name := content[loc[2]:loc[3]]
-			// Body starts at the '{' after the match.
 			bodyStart := loc[1]
 			body := extractBraced(content, bodyStart)
 			if body == "" {
@@ -95,7 +107,6 @@ func parseMacros(dir string) map[string]string {
 // extractBraced extracts the content inside the next {...} starting at pos.
 // Handles nested braces. Returns empty string if no braced group found.
 func extractBraced(s string, pos int) string {
-	// Find opening brace.
 	for pos < len(s) && s[pos] != '{' {
 		pos++
 	}
@@ -119,8 +130,16 @@ func extractBraced(s string, pos int) string {
 }
 
 // applyMacros replaces \MacroName{} and \MacroName with their expansion.
+// Sorted iteration ensures deterministic output.
 func applyMacros(text string, macros map[string]string) string {
-	for name, body := range macros {
+	names := make([]string, 0, len(macros))
+	for name := range macros {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		body := macros[name]
 		// \Method{} → body
 		text = strings.ReplaceAll(text, `\`+name+`{}`, body)
 		// \Method → body (only at word boundary, not \MethodFull)
@@ -146,6 +165,11 @@ func (w *Walker) runDetex(ctx context.Context, text string) (string, error) {
 
 	out, err := exec.CommandContext(ctx, w.detexBin, "-l", tmp.Name()).Output()
 	if err != nil {
+		// Include detex's stderr in the error for diagnostics.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return "", fmt.Errorf("exit %d: %s", exitErr.ExitCode(), strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return "", err
 	}
 	return string(out), nil
@@ -162,32 +186,31 @@ func fallbackStrip(text string) string {
 		text = text[:idx]
 	}
 
+	// Strip table/figure environments FIRST (before generic command strip destroys \begin/\end).
+	for _, env := range []string{"table", "table*", "figure", "figure*", "tabular"} {
+		re := regexp.MustCompile(`(?s)\\begin\{` + regexp.QuoteMeta(env) + `\}.*?\\end\{` + regexp.QuoteMeta(env) + `\}`)
+		text = re.ReplaceAllString(text, "")
+	}
+
 	// Strip display math environments.
 	for _, env := range []string{"equation", "equation*", "align", "align*", "gather", "multline"} {
 		re := regexp.MustCompile(`(?s)\\begin\{` + regexp.QuoteMeta(env) + `\}.*?\\end\{` + regexp.QuoteMeta(env) + `\}`)
 		text = re.ReplaceAllString(text, "")
 	}
-	// \[...\] and $$...$$
-	text = regexp.MustCompile(`(?s)\\\[.*?\\]`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`(?s)\$\$.*?\$\$`).ReplaceAllString(text, "")
+	text = reDisplayMathBracket.ReplaceAllString(text, "")
+	text = reDisplayMathDollar.ReplaceAllString(text, "")
 
 	// Strip inline math $...$
-	text = regexp.MustCompile(`\$[^$]+?\$`).ReplaceAllString(text, "")
+	text = reInlineMath.ReplaceAllString(text, "")
 
 	// Strip citations/refs.
-	text = regexp.MustCompile(`\\(?:citep?|citet|ref|cref|label|eqref)\{[^}]*\}`).ReplaceAllString(text, "")
+	text = reCiteRef.ReplaceAllString(text, "")
 
 	// Unwrap formatting commands.
 	text = reFormatCmd.ReplaceAllString(text, "$1")
 
 	// Strip remaining commands with no arguments.
-	text = regexp.MustCompile(`\\[a-zA-Z]+`).ReplaceAllString(text, "")
-
-	// Strip table/figure environments.
-	for _, env := range []string{"table", "table*", "figure", "figure*", "tabular"} {
-		re := regexp.MustCompile(`(?s)\\begin\{` + regexp.QuoteMeta(env) + `\}.*?\\end\{` + regexp.QuoteMeta(env) + `\}`)
-		text = re.ReplaceAllString(text, "")
-	}
+	text = reGenericCommand.ReplaceAllString(text, "")
 
 	// Remove remaining braces.
 	text = strings.ReplaceAll(text, "{", "")
@@ -198,15 +221,9 @@ func fallbackStrip(text string) string {
 
 // cleanDetexOutput removes residual noise from detex output.
 func cleanDetexOutput(text string) string {
-	// Remove cite-key leaks (e.g. "yuan2024kvcachecompressionreturn").
 	text = reCiteKey.ReplaceAllString(text, "")
-
-	// Fix orphan punctuation from removed macros.
 	text = reOrphanComma.ReplaceAllString(text, " ")
 	text = reOrphanColon.ReplaceAllString(text, " ")
-
-	// Collapse blank lines.
 	text = reBlankLines.ReplaceAllString(text, "\n\n")
-
 	return strings.TrimSpace(text)
 }

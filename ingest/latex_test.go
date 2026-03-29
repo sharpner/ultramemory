@@ -126,6 +126,13 @@ After document should be stripped.`
 			t.Errorf("fallbackStrip: noise %q survived", noise)
 		}
 	}
+
+	// Table content must be stripped (not leak as noise).
+	for _, tableNoise := range []string{"Model & CR", "65.2"} {
+		if strings.Contains(got, tableNoise) {
+			t.Errorf("fallbackStrip: table content %q leaked through", tableNoise)
+		}
+	}
 }
 
 func TestSanitizeTeX_RealPaper(t *testing.T) {
