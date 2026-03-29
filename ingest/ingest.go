@@ -259,6 +259,7 @@ func isText(path string) bool {
 		".ts": true, ".tsx": true, ".js": true, ".jsx": true,
 		".py": true, ".rs": true, ".sql": true, ".env": true,
 		".proto": true, ".graphql": true, ".html": true, ".css": true,
+		".tex": true, ".bib": true,
 	}
 	return ok[ext]
 }
