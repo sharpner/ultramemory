@@ -5,23 +5,10 @@ import (
 	"testing"
 )
 
-// seedEntities creates source and target entities needed for edge FK constraints.
-func seedEntities(t *testing.T, db *DB) {
-	t.Helper()
-	ctx := context.Background()
-	for _, e := range []Entity{
-		{UUID: "src", Name: "Alice", EntityType: "Person", GroupID: "g"},
-		{UUID: "tgt", Name: "TechCorp", EntityType: "Organisation", GroupID: "g"},
-	} {
-		if _, err := db.UpsertEntity(ctx, e); err != nil {
-			t.Fatalf("seed entity %s: %v", e.UUID, err)
-		}
-	}
-}
-
 func TestUpsertEdge_Dedup(t *testing.T) {
 	db := openTestDB(t)
-	seedEntities(t, db)
+	insertEntity(t, db, "src", "Alice", "g")
+	insertEntity(t, db, "tgt", "TechCorp", "g")
 	ctx := context.Background()
 
 	e := Edge{
@@ -55,7 +42,8 @@ func TestUpsertEdge_Dedup(t *testing.T) {
 
 func TestUpsertEdge_DifferentRelation(t *testing.T) {
 	db := openTestDB(t)
-	seedEntities(t, db)
+	insertEntity(t, db, "src", "Alice", "g")
+	insertEntity(t, db, "tgt", "TechCorp", "g")
 	ctx := context.Background()
 
 	e1 := Edge{UUID: "e1", SourceUUID: "src", TargetUUID: "tgt", Name: "WORKS_AT", Fact: "f1", GroupID: "g"}

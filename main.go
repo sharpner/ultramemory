@@ -92,7 +92,7 @@ func main() {
 		if fs.NArg() < 1 {
 			fatalf("usage: ultramemory ingest [-source URL] <path>")
 		}
-		warnTrailingFlags(fs)
+		rejectTrailingFlags(fs)
 		must(client.Ping(ctx), "ping ollama")
 		w := ingest.New(db, groupID).WithOCR(client)
 		if *source != "" {
@@ -117,7 +117,7 @@ func main() {
 		if fs.NArg() < 1 {
 			fatalf("usage: ultramemory run [-source URL] <path>")
 		}
-		warnTrailingFlags(fs)
+		rejectTrailingFlags(fs)
 		must(client.Ping(ctx), "ping ollama")
 
 		fmt.Fprintln(os.Stderr, "Warming up model…")
@@ -228,14 +228,7 @@ func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThr
 		concurrency = 4
 	}
 
-	// Recover jobs orphaned by a previous crash before starting.
-	n, err := db.RecoverStaleJobs(ctx, staleJobTimeout)
-	if err != nil {
-		slog.Error("recover stale jobs", "err", err)
-	}
-	if n > 0 {
-		slog.Info("recovered stale jobs", "count", n)
-	}
+	recoverStaleJobs(ctx, db)
 
 	// Worker pool — but LLM semaphore in Extractor limits actual LLM calls to 1.
 	jobs := make(chan *store.Job, concurrency)
@@ -273,13 +266,7 @@ func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThr
 		case <-ticker.C:
 			// Periodically recover stale jobs in case a worker goroutine panicked.
 			if time.Since(lastRecover) > staleJobTimeout {
-				rn, rerr := db.RecoverStaleJobs(ctx, staleJobTimeout)
-				if rerr != nil {
-					slog.Error("recover stale jobs", "err", rerr)
-				}
-				if rn > 0 {
-					slog.Info("recovered stale jobs", "count", rn)
-				}
+				recoverStaleJobs(ctx, db)
 				lastRecover = time.Now()
 			}
 
@@ -448,14 +435,24 @@ func must(err error, msg string) {
 	}
 }
 
+func recoverStaleJobs(ctx context.Context, db *store.DB) {
+	n, err := db.RecoverStaleJobs(ctx, staleJobTimeout)
+	if err != nil {
+		slog.Error("recover stale jobs", "err", err)
+	}
+	if n > 0 {
+		slog.Info("recovered stale jobs", "count", n)
+	}
+}
+
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
 }
 
-// warnTrailingFlags detects flags placed after the positional path argument
+// rejectTrailingFlags detects flags placed after the positional path argument
 // (e.g. "ingest ./path -source URL") which Go's flag package silently ignores.
-func warnTrailingFlags(fs *flag.FlagSet) {
+func rejectTrailingFlags(fs *flag.FlagSet) {
 	for _, arg := range fs.Args()[1:] {
 		if strings.HasPrefix(arg, "-") {
 			fatalf("flags must come before the path argument: %q\nusage: ultramemory %s [-flags] <path>", arg, fs.Name())
