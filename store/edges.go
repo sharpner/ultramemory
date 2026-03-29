@@ -87,6 +87,10 @@ func (d *DB) CountEdges(ctx context.Context, groupID string) (int, error) {
 
 // SearchEdgesFTS performs fulltext search over edge facts.
 func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit int) ([]Edge, error) {
+	fq := fts5Query(query)
+	if fq == "" {
+		return nil, nil
+	}
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT e.uuid, e.source_uuid, e.target_uuid, e.name, e.fact, e.valid_at, e.embedding
 		FROM edges_fts f
@@ -94,7 +98,7 @@ func (d *DB) SearchEdgesFTS(ctx context.Context, query, groupID string, limit in
 		WHERE edges_fts MATCH ? AND e.group_id = ?
 		ORDER BY rank
 		LIMIT ?`,
-		fts5Query(query), groupID, limit,
+		fq, groupID, limit,
 	)
 	if err != nil {
 		return nil, err

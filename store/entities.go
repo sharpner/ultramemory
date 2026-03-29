@@ -146,6 +146,10 @@ func (d *DB) EntitiesForEpisodes(ctx context.Context, episodeUUIDs []string, gro
 
 // SearchEntitiesFTS performs fulltext search on entity names.
 func (d *DB) SearchEntitiesFTS(ctx context.Context, query, groupID string, limit int) ([]Entity, error) {
+	fq := fts5Query(query)
+	if fq == "" {
+		return nil, nil
+	}
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT e.uuid, e.name, e.entity_type, e.embedding, e.description
 		FROM entities_fts f
@@ -153,7 +157,7 @@ func (d *DB) SearchEntitiesFTS(ctx context.Context, query, groupID string, limit
 		WHERE entities_fts MATCH ? AND e.group_id = ?
 		ORDER BY rank
 		LIMIT ?`,
-		fts5Query(query), groupID, limit,
+		fq, groupID, limit,
 	)
 	if err != nil {
 		return nil, err

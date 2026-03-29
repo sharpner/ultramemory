@@ -78,6 +78,10 @@ func (d *DB) FirstEdgeSource(ctx context.Context, edgeUUID string) string {
 
 // SearchEpisodesFTS performs fulltext search over episode content.
 func (d *DB) SearchEpisodesFTS(ctx context.Context, query, groupID string, limit int) ([]Episode, error) {
+	fq := fts5Query(query)
+	if fq == "" {
+		return nil, nil
+	}
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT e.uuid, e.content, e.source, e.embedding
 		FROM episodes_fts f
@@ -85,7 +89,7 @@ func (d *DB) SearchEpisodesFTS(ctx context.Context, query, groupID string, limit
 		WHERE episodes_fts MATCH ? AND e.group_id = ?
 		ORDER BY rank
 		LIMIT ?`,
-		fts5Query(query), groupID, limit,
+		fq, groupID, limit,
 	)
 	if err != nil {
 		return nil, err

@@ -209,8 +209,8 @@ func fts5Query(q string) string {
 			}
 			return r
 		}, w)
-		if len(w) < 2 {
-			continue // drop possessive "s", single letters, etc.
+		if len(w) < 2 && !isDigit(w) {
+			continue // drop possessive "s", single letters — but keep digits like "4"
 		}
 		terms = append(terms, w+"*")
 	}
@@ -219,6 +219,15 @@ func fts5Query(q string) string {
 	}
 	// OR semantics: any matching term ranks higher; all terms present = highest score.
 	return strings.Join(terms, " OR ")
+}
+
+func isDigit(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // CosineSimilarity computes cosine similarity between two vectors.
