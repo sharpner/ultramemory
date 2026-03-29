@@ -27,6 +27,7 @@ const (
 type Walker struct {
 	db           *store.DB
 	groupID      string
+	sourceOverride string // if set, used as source instead of file path
 	pdftotextBin string // optional: poppler pdftotext
 	pdftoppmBin  string // optional: poppler pdftoppm (needed for OCR fallback)
 	tesseractBin string // optional: Tesseract OCR
@@ -46,6 +47,12 @@ func New(db *store.DB, groupID string) *Walker {
 	if w.tesseractBin == "" {
 		slog.Warn("tesseract not found — scanned PDFs will fall back to gemma3 OCR (lower accuracy)")
 	}
+	return w
+}
+
+// WithSource sets a source override (e.g. an arXiv URL) used instead of the file path.
+func (w *Walker) WithSource(source string) *Walker {
+	w.sourceOverride = source
 	return w
 }
 
@@ -221,6 +228,9 @@ func (w *Walker) runTesseract(ctx context.Context, imagePath string) (string, er
 }
 
 func (w *Walker) enqueueChunks(ctx context.Context, text, source string, total *int) error {
+	if w.sourceOverride != "" {
+		source = w.sourceOverride
+	}
 	for _, c := range chunk(text, chunkSize, chunkOverlap) {
 		c = strings.TrimSpace(c)
 		if len(c) < 50 {

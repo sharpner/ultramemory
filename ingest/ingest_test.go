@@ -370,6 +370,37 @@ R1-Qwen 2.5    & 22$\times$ & 67.1 \\
 	}
 }
 
+func TestWalk_WithSourceOverride(t *testing.T) {
+	db := openIngestTestDB(t)
+	dir := t.TempDir()
+	content := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 5)
+	if err := os.WriteFile(filepath.Join(dir, "paper.tex"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	arxivURL := "https://arxiv.org/abs/2511.01815"
+	n, err := New(db, "g").WithSource(arxivURL).Walk(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatal("expected >= 1 chunk")
+	}
+
+	// Verify the source in the payload is the arXiv URL, not the file path.
+	job, err := db.NextJob(context.Background())
+	if err != nil || job == nil {
+		t.Fatal("expected a job")
+	}
+	var p graph.IngestPayload
+	if err := json.Unmarshal([]byte(job.Payload), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Source != arxivURL {
+		t.Errorf("source = %q, want %q", p.Source, arxivURL)
+	}
+}
+
 func TestWalk_SkipsHiddenDirs(t *testing.T) {
 	db := openIngestTestDB(t)
 	dir := t.TempDir()
