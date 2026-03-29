@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -201,13 +202,13 @@ func fts5Query(q string) string {
 
 	terms := make([]string, 0, len(rawTokens))
 	for _, w := range rawTokens {
-		// Strip remaining FTS5 special chars to avoid syntax errors.
+		// Keep only letters, digits, and underscores — drop everything
+		// else to avoid FTS5 syntax errors from special chars.
 		w = strings.Map(func(r rune) rune {
-			switch r {
-			case '"', '(', ')', '*', '^', '-', '+', ':', '.', '?', '!', ',', ';', '{', '}', '[', ']', '~', '&', '|', '@', '#', '$', '%', '/':
-				return -1
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+				return r
 			}
-			return r
+			return -1
 		}, w)
 		if len(w) < 2 && !isDigit(w) {
 			continue // drop possessive "s", single letters — but keep digits like "4"

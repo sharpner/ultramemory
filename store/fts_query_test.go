@@ -57,6 +57,30 @@ func TestFts5Query_MixedShortTokens(t *testing.T) {
 	}
 }
 
+func TestFts5Query_SpecialCharsStripped(t *testing.T) {
+	// Entity names with special chars like "b=4" must not produce FTS5 syntax errors.
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{"b=4", "b=4 should keep both parts"},
+		{"x<y", "x<y should keep letters"},
+		{"n≥1", "unicode operators stripped"},
+		{"α=0.05", "greek + equals"},
+	} {
+		q := fts5Query(tc.input)
+		if q == "" {
+			t.Errorf("fts5Query(%q) returned empty string — %s", tc.input, tc.want)
+		}
+		// Must not contain any FTS5 special chars.
+		for _, bad := range []string{"=", "<", ">", "≥", "≤"} {
+			if strings.Contains(q, bad) {
+				t.Errorf("fts5Query(%q) = %q still contains %q", tc.input, q, bad)
+			}
+		}
+	}
+}
+
 func TestFts5Query_NormalQuery(t *testing.T) {
 	// Regular query without possessives should still work.
 	q := fts5Query("When did Caroline attend yoga")
