@@ -22,23 +22,28 @@ type IngestPayload struct {
 }
 
 // Extractor runs the full graph-building pipeline for a document chunk.
-// A semaphore (cap 1) ensures max one gemma3:4b call at a time.
+// The semaphore limits concurrent extraction (gemma3) calls.
+// Embedding (mxbai) runs outside the semaphore since it uses a different model.
 type Extractor struct {
 	db               *store.DB
 	llm              *llm.Client
-	sem              chan struct{} // capacity 1 = max 1 concurrent LLM call
+	sem              chan struct{} // limits concurrent LLM extraction calls
 	muEntity         sync.Mutex   // serialise entity upserts to avoid duplicates under concurrency
 	embedWG          sync.WaitGroup // tracks in-flight embedding goroutines
 	resolveThreshold float64
 }
 
-// New creates a new Extractor. resolveThreshold is the minimum cosine similarity
-// for two entities to be considered the same (e.g. 0.92).
-func New(db *store.DB, client *llm.Client, resolveThreshold float64) *Extractor {
+// New creates a new Extractor. llmParallel controls how many concurrent extraction
+// calls are allowed (match with OLLAMA_NUM_PARALLEL). resolveThreshold is the
+// minimum cosine similarity for entity deduplication (e.g. 0.92).
+func New(db *store.DB, client *llm.Client, resolveThreshold float64, llmParallel int) *Extractor {
+	if llmParallel < 1 {
+		llmParallel = 1
+	}
 	return &Extractor{
 		db:               db,
 		llm:              client,
-		sem:              make(chan struct{}, 1),
+		sem:              make(chan struct{}, llmParallel),
 		resolveThreshold: resolveThreshold,
 	}
 }

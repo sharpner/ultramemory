@@ -89,6 +89,7 @@ ultramemory status
 | `MEMORY_EMBED_MODEL` | `mxbai-embed-large`     | Embedding model (1024-dim)       |
 | `MEMORY_GROUP`     | `default`                 | Namespace for graph isolation    |
 | `MEMORY_RESOLVE_THRESHOLD` | `0.92`          | Cosine similarity threshold for entity deduplication (0–1) |
+| `MEMORY_LLM_PARALLEL`       | `1`           | Concurrent extraction calls (match `OLLAMA_NUM_PARALLEL`) |
 
 ## JSON API
 

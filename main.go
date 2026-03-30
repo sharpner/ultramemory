@@ -70,6 +70,14 @@ func main() {
 		}
 		resolveThreshold = t
 	}
+	llmParallel := 1
+	if v := os.Getenv("MEMORY_LLM_PARALLEL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			fatalf("MEMORY_LLM_PARALLEL must be a positive integer, got %q", v)
+		}
+		llmParallel = n
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -108,7 +116,7 @@ func main() {
 		if err := client.Warmup(ctx); err != nil {
 			slog.Warn("warmup failed", "err", err)
 		}
-		runWorker(ctx, db, client, resolveThreshold)
+		runWorker(ctx, db, client, resolveThreshold, llmParallel)
 
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
@@ -132,7 +140,7 @@ func main() {
 		n, err := w.Walk(ctx, fs.Arg(0))
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
-		runWorker(ctx, db, client, resolveThreshold)
+		runWorker(ctx, db, client, resolveThreshold, llmParallel)
 
 	case "search":
 		fs := flag.NewFlagSet("search", flag.ExitOnError)
@@ -221,8 +229,8 @@ func main() {
 const staleJobTimeout = 5 * time.Minute
 
 // runWorker polls the SQLite queue and processes jobs with max 1 concurrent LLM call.
-func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThreshold float64) {
-	ext := graph.New(db, client, resolveThreshold)
+func runWorker(ctx context.Context, db *store.DB, client *llm.Client, resolveThreshold float64, llmParallel int) {
+	ext := graph.New(db, client, resolveThreshold, llmParallel)
 	concurrency := runtime.NumCPU()
 	if concurrency > 4 {
 		concurrency = 4
@@ -419,7 +427,8 @@ Environment:
   MEMORY_MODEL               extraction model     (default: gemma3:4b)
   MEMORY_EMBED_MODEL         embedding model      (default: mxbai-embed-large)
   MEMORY_GROUP               namespace/group      (default: default)
-  MEMORY_RESOLVE_THRESHOLD   resolve similarity   (default: 0.92)`)
+  MEMORY_RESOLVE_THRESHOLD   resolve similarity   (default: 0.92)
+  MEMORY_LLM_PARALLEL        concurrent LLM calls (default: 1, match OLLAMA_NUM_PARALLEL)`)
 }
 
 func envOr(key, fallback string) string {

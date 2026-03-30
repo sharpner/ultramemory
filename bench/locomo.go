@@ -222,7 +222,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 							slog.Warn("episode insert failed", "err", err)
 						}
 					} else {
-						ext := graph.New(db, client, resolveThreshold)
+						ext := graph.New(db, client, resolveThreshold, 1)
 						if err := ext.Process(ctx, chunk, source, groupID); err != nil {
 							slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
 						}
