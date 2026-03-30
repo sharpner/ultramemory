@@ -79,6 +79,10 @@ ultramemory search "Alice Schmidt TechCorp"
 ultramemory search -max-tokens 200 "Alice Schmidt TechCorp"
 ultramemory search -format json -max-tokens 500 "Alice Schmidt TechCorp"
 
+# List detected communities
+ultramemory communities
+ultramemory communities -format json
+
 # Status
 ultramemory status
 ```

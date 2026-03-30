@@ -6,6 +6,7 @@
 //
 //	memory-local ingest <path>          # walk dir, queue all text files
 //	memory-local search <query>         # hybrid search (FTS + vector)
+//	memory-local communities            # list detected communities
 //	memory-local status                 # queue + graph stats
 //	memory-local worker                 # run the extraction worker (blocking)
 //	memory-local run <path>             # ingest + worker in one shot
@@ -140,7 +141,7 @@ func main() {
 				slog.Warn("warmup failed", "err", err)
 			}
 		}
-		runWorker(ctx, db, extractor, client, resolveThreshold, llmParallel)
+		runWorker(ctx, db, extractor, client, resolveThreshold, llmParallel, groupID)
 
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
@@ -166,7 +167,7 @@ func main() {
 		n, err := w.Walk(ctx, fs.Arg(0))
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
-		runWorker(ctx, db, extractor, client, resolveThreshold, llmParallel)
+		runWorker(ctx, db, extractor, client, resolveThreshold, llmParallel, groupID)
 
 	case "search":
 		fs := flag.NewFlagSet("search", flag.ExitOnError)
@@ -250,6 +251,22 @@ func main() {
 		must(err, "requeue failed jobs")
 		fmt.Fprintf(os.Stderr, "✓ Requeued %d failed jobs\n", n)
 
+	case "communities":
+		fs := flag.NewFlagSet("communities", flag.ExitOnError)
+		format := fs.String("format", "text", "output format: text|json")
+		minMembers := fs.Int("min", 2, "minimum members to show a community")
+		detect := fs.Bool("detect", false, "run Louvain detection (writes to DB — don't use while worker is running)")
+		resolution := fs.Float64("resolution", 1.0, "Louvain resolution (higher = more, smaller communities)")
+		_ = fs.Parse(os.Args[2:])
+		if *detect {
+			fmt.Fprintln(os.Stderr, "Running Louvain community detection…")
+			cr, err := db.DetectCommunities(ctx, groupID, *resolution)
+			must(err, "detect communities")
+			fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities\n", cr.Communities, cr.Entities)
+			graph.GenerateCommunityReports(ctx, db, nil, groupID) //nolint:errcheck
+		}
+		printCommunities(ctx, db, groupID, *format, *minMembers)
+
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		format := fs.String("format", "text", "output format: text|json")
@@ -266,7 +283,7 @@ const staleJobTimeout = 5 * time.Minute
 
 // runWorker polls the SQLite queue and processes jobs with max 1 concurrent LLM call.
 // extractor handles entity/edge extraction; embedder handles all embeddings (always Ollama).
-func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, resolveThreshold float64, llmParallel int) {
+func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, resolveThreshold float64, llmParallel int, groupID string) {
 	ext := graph.New(db, extractor, embedder, resolveThreshold, llmParallel)
 	concurrency := runtime.NumCPU()
 	if concurrency > 4 {
@@ -301,6 +318,7 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 	lastLog := time.Now()
 	lastRecover := time.Now()
 	processed := 0
+	communityDirty := false // true when new jobs processed since last community detection
 
 	for {
 		select {
@@ -315,6 +333,7 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 				lastRecover = time.Now()
 			}
 
+			queueEmpty := true
 			for {
 				job, err := db.NextJob(ctx)
 				if err != nil {
@@ -324,6 +343,8 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 				if job == nil {
 					break // queue empty
 				}
+				queueEmpty = false
+				communityDirty = true
 				jobs <- job
 				processed++
 
@@ -337,6 +358,21 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 						"failed", stats["failed"],
 					)
 					lastLog = time.Now()
+				}
+			}
+
+			// Run community detection once when queue drains after processing.
+			if queueEmpty && communityDirty {
+				communityDirty = false
+				slog.Info("queue drained — running community detection")
+				cr, err := db.DetectCommunities(ctx, groupID, 1.0)
+				if err != nil {
+					slog.Error("community detection failed", "err", err)
+				} else {
+					slog.Info("communities detected", "communities", cr.Communities, "entities", cr.Entities)
+					if err := graph.GenerateCommunityReports(ctx, db, nil, groupID); err != nil {
+						slog.Error("community reports failed", "err", err)
+					}
 				}
 			}
 		}
@@ -435,6 +471,44 @@ func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 	}
 }
 
+func printCommunities(ctx context.Context, db *store.DB, groupID, format string, minMembers int) {
+	communities, err := db.ListCommunities(ctx, groupID)
+	must(err, "list communities")
+
+	// Filter by minimum member count.
+	filtered := communities[:0]
+	for _, c := range communities {
+		if len(c.Members) < minMembers {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		for _, c := range filtered {
+			_ = enc.Encode(c)
+		}
+		return
+	}
+
+	if len(filtered) == 0 {
+		fmt.Printf("(no communities with >= %d members)\n", minMembers)
+		return
+	}
+
+	fmt.Printf("── Communities (%d shown, %d total, min %d members) ────────\n\n",
+		len(filtered), len(communities), minMembers)
+	for _, c := range filtered {
+		fmt.Printf("  Community %d  (%d members)\n", c.CommunityID, len(c.Members))
+		fmt.Printf("    Members: %s\n", strings.Join(c.Members, ", "))
+		if c.Report != "" {
+			fmt.Printf("    Report:  %s\n", c.Report)
+		}
+		fmt.Println()
+	}
+}
+
 func printResolveResult(r store.ResolveResult, dryRun bool) {
 	mode := ""
 	if dryRun {
@@ -456,6 +530,7 @@ func usage() {
   search  <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
   retry            requeue all failed jobs for reprocessing
   resolve          merge near-duplicate entities (flags: -dry-run, -threshold 0.85)
+  communities      detect + list communities (Louvain)          (flags: -format, -resolution)
   bench   <json>   evaluate against LoCoMo benchmark (flags: -limit N, -baseline)
   status           show queue and graph statistics
 

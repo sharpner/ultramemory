@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"gonum.org/v1/gonum/graph/community"
@@ -273,6 +274,61 @@ func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMem
 		})
 	}
 	return inputs, nil
+}
+
+// CommunitySummary holds display data for one community.
+type CommunitySummary struct {
+	CommunityID int
+	Members     []string // entity names
+	Report      string   // may be empty
+}
+
+// ListCommunities returns a summary for every detected community in the group,
+// sorted by member count descending.
+func (d *DB) ListCommunities(ctx context.Context, groupID string) ([]CommunitySummary, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT e.community_id, e.name, COALESCE(cr.report, '')
+		FROM entities e
+		LEFT JOIN community_reports cr
+			ON cr.community_id = e.community_id AND cr.group_id = e.group_id
+		WHERE e.group_id = ? AND e.community_id >= 0
+		ORDER BY e.community_id, e.name`,
+		groupID)
+	if err != nil {
+		return nil, fmt.Errorf("list communities: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	byID := map[int]*CommunitySummary{}
+	var order []int
+	for rows.Next() {
+		var cid int
+		var name, report string
+		if err := rows.Scan(&cid, &name, &report); err != nil {
+			return nil, err
+		}
+		s, ok := byID[cid]
+		if !ok {
+			s = &CommunitySummary{CommunityID: cid, Report: report}
+			byID[cid] = s
+			order = append(order, cid)
+		}
+		s.Members = append(s.Members, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Sort by member count descending.
+	slices.SortFunc(order, func(a, b int) int {
+		return len(byID[b].Members) - len(byID[a].Members)
+	})
+
+	result := make([]CommunitySummary, len(order))
+	for i, cid := range order {
+		result[i] = *byID[cid]
+	}
+	return result, nil
 }
 
 // StoreCommunityReport persists a generated report for a community.

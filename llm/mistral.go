@@ -230,8 +230,22 @@ func (m *MistralClient) ExtractEntities(ctx context.Context, content string) (*E
 
 	var result ExtractedEntities
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return nil, fmt.Errorf("mistral entity JSON: %w (raw: %s)", err, truncate(raw, 120))
+		// Mistral may return a bare array instead of {"extracted_entities":[...]}
+		var direct []ExtractedEntity
+		if err2 := json.Unmarshal([]byte(raw), &direct); err2 != nil {
+			return nil, fmt.Errorf("mistral entity JSON: %w (raw: %s)", err, truncate(raw, 120))
+		}
+		result.Entities = direct
 	}
+	// Drop entries with empty names (e.g. Mistral returned off-schema JSON).
+	filtered := result.Entities[:0]
+	for _, e := range result.Entities {
+		if e.Name == "" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	result.Entities = filtered
 	return &result, nil
 }
 

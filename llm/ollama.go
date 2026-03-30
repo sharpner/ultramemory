@@ -248,9 +248,24 @@ func (c *Client) ExtractEntities(ctx context.Context, content string) (*Extracte
 	}
 
 	var result ExtractedEntities
-	if err := json.Unmarshal([]byte(cleanStructuredContent(raw)), &result); err != nil {
-		return nil, fmt.Errorf("entity JSON: %w (raw: %s)", err, truncate(raw, 120))
+	cleaned := cleanStructuredContent(raw)
+	if err := json.Unmarshal([]byte(cleaned), &result); err != nil {
+		// LLM may return a bare array instead of {"extracted_entities":[...]}
+		var direct []ExtractedEntity
+		if err2 := json.Unmarshal([]byte(cleaned), &direct); err2 != nil {
+			return nil, fmt.Errorf("entity JSON: %w (raw: %s)", err, truncate(raw, 120))
+		}
+		result.Entities = direct
 	}
+	// Drop entries with empty names (e.g. LLM returned off-schema JSON).
+	filtered := result.Entities[:0]
+	for _, e := range result.Entities {
+		if e.Name == "" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	result.Entities = filtered
 	return &result, nil
 }
 
