@@ -181,3 +181,64 @@ func TestCompleteAndFailJob(t *testing.T) {
 		t.Errorf("expected 1 pending (requeued), got %d", stats["pending"])
 	}
 }
+
+func TestRequeueFailed(t *testing.T) {
+	db := openQueueTestDB(t)
+	ctx := context.Background()
+
+	// Push a job and exhaust its retries so it stays failed.
+	if err := db.PushJob(ctx, JobTypeIngest, `{"x":1}`); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.NextJob(ctx)
+	for i := 0; i < 3; i++ {
+		if err := db.FailJob(ctx, job.ID, "boom"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, _ := db.QueueStats(ctx)
+	if stats["failed"] != 1 {
+		t.Fatalf("expected 1 failed job, got %d", stats["failed"])
+	}
+
+	// Requeue.
+	n, err := db.RequeueFailed(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 requeued, got %d", n)
+	}
+
+	// Job should be claimable again.
+	retried, err := db.NextJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried == nil {
+		t.Fatal("expected requeued job to be claimable")
+	}
+	if retried.ID != job.ID {
+		t.Errorf("expected same job ID %d, got %d", job.ID, retried.ID)
+	}
+
+	// Verify stats: no more failed.
+	stats, _ = db.QueueStats(ctx)
+	if stats["failed"] != 0 {
+		t.Errorf("expected 0 failed after requeue, got %d", stats["failed"])
+	}
+}
+
+func TestRequeueFailed_NothingFailed(t *testing.T) {
+	db := openQueueTestDB(t)
+	ctx := context.Background()
+
+	n, err := db.RequeueFailed(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 requeued on empty queue, got %d", n)
+	}
+}
