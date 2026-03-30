@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -81,6 +82,27 @@ type ExtractedEntity struct {
 // ExtractedEntities is the entity extraction response.
 type ExtractedEntities struct {
 	Entities []ExtractedEntity `json:"extracted_entities"`
+}
+
+// parseAndFilterEntities drops entities with empty names and logs dropped count.
+func parseAndFilterEntities(raw string, result ExtractedEntities) (*ExtractedEntities, error) {
+	filtered := result.Entities[:0]
+	dropped := 0
+	for _, e := range result.Entities {
+		if e.Name == "" {
+			dropped++
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if dropped > 0 {
+		slog.Warn("dropped entities with empty names",
+			"dropped", dropped,
+			"kept", len(filtered),
+			"raw", truncate(raw, 200))
+	}
+	result.Entities = filtered
+	return &result, nil
 }
 
 // ExtractedEdge is one relationship from the LLM response.
@@ -255,18 +277,10 @@ func (c *Client) ExtractEntities(ctx context.Context, content string) (*Extracte
 		if err2 := json.Unmarshal([]byte(cleaned), &direct); err2 != nil {
 			return nil, fmt.Errorf("entity JSON: %w (raw: %s)", err, truncate(raw, 120))
 		}
+		slog.Debug("ollama returned bare entity array", "count", len(direct))
 		result.Entities = direct
 	}
-	// Drop entries with empty names (e.g. LLM returned off-schema JSON).
-	filtered := result.Entities[:0]
-	for _, e := range result.Entities {
-		if e.Name == "" {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	result.Entities = filtered
-	return &result, nil
+	return parseAndFilterEntities(raw, result)
 }
 
 // ExtractEdges calls gemma3:4b to extract edges between known entities.

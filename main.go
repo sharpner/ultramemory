@@ -263,7 +263,9 @@ func main() {
 			cr, err := db.DetectCommunities(ctx, groupID, *resolution)
 			must(err, "detect communities")
 			fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities\n", cr.Communities, cr.Entities)
-			graph.GenerateCommunityReports(ctx, db, nil, groupID) //nolint:errcheck
+			if err := graph.GenerateCommunityReports(ctx, db, nil, groupID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: community report generation failed: %v\n", err)
+			}
 		}
 		printCommunities(ctx, db, groupID, *format, *minMembers)
 
@@ -363,12 +365,12 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 
 			// Run community detection once when queue drains after processing.
 			if queueEmpty && communityDirty {
-				communityDirty = false
 				slog.Info("queue drained — running community detection")
 				cr, err := db.DetectCommunities(ctx, groupID, 1.0)
 				if err != nil {
-					slog.Error("community detection failed", "err", err)
+					slog.Error("community detection failed — will retry on next drain", "err", err)
 				} else {
+					communityDirty = false
 					slog.Info("communities detected", "communities", cr.Communities, "entities", cr.Entities)
 					if err := graph.GenerateCommunityReports(ctx, db, nil, groupID); err != nil {
 						slog.Error("community reports failed", "err", err)

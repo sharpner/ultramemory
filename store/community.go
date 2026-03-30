@@ -278,9 +278,9 @@ func (d *DB) CommunityInputsForGroup(ctx context.Context, groupID string, minMem
 
 // CommunitySummary holds display data for one community.
 type CommunitySummary struct {
-	CommunityID int
-	Members     []string // entity names
-	Report      string   // may be empty
+	CommunityID int      `json:"community_id"`
+	Members     []string `json:"members"`
+	Report      string   `json:"report,omitempty"`
 }
 
 // ListCommunities returns a summary for every detected community in the group,

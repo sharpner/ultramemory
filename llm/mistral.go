@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -235,18 +236,10 @@ func (m *MistralClient) ExtractEntities(ctx context.Context, content string) (*E
 		if err2 := json.Unmarshal([]byte(raw), &direct); err2 != nil {
 			return nil, fmt.Errorf("mistral entity JSON: %w (raw: %s)", err, truncate(raw, 120))
 		}
+		slog.Debug("mistral returned bare entity array", "count", len(direct))
 		result.Entities = direct
 	}
-	// Drop entries with empty names (e.g. Mistral returned off-schema JSON).
-	filtered := result.Entities[:0]
-	for _, e := range result.Entities {
-		if e.Name == "" {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	result.Entities = filtered
-	return &result, nil
+	return parseAndFilterEntities(raw, result)
 }
 
 // ExtractEdges calls the Mistral API to extract relationships between known entities.
