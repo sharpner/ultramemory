@@ -245,6 +245,11 @@ func main() {
 		must(err, "resolve")
 		printResolveResult(result, *dryRun)
 
+	case "retry":
+		n, err := db.RequeueFailed(ctx)
+		must(err, "requeue failed jobs")
+		fmt.Fprintf(os.Stderr, "✓ Requeued %d failed jobs\n", n)
+
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		format := fs.String("format", "text", "output format: text|json")
@@ -449,6 +454,7 @@ func usage() {
   ingest  <path>   queue all text files for processing         [-source URL]
   worker           process queued jobs (blocking)
   search  <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
+  retry            requeue all failed jobs for reprocessing
   resolve          merge near-duplicate entities (flags: -dry-run, -threshold 0.85)
   bench   <json>   evaluate against LoCoMo benchmark (flags: -limit N, -baseline)
   status           show queue and graph statistics

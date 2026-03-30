@@ -94,6 +94,19 @@ func (d *DB) RecoverStaleJobs(ctx context.Context, staleAfter time.Duration) (in
 	return res.RowsAffected()
 }
 
+// RequeueFailed resets all failed jobs back to pending with attempts zeroed.
+func (d *DB) RequeueFailed(ctx context.Context) (int64, error) {
+	res, err := d.sql.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'pending', attempts = 0, error = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE status = 'failed'`,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("requeue failed: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // QueueStats returns pending/processing/done/failed counts.
 func (d *DB) QueueStats(ctx context.Context) (map[string]int, error) {
 	rows, err := d.sql.QueryContext(ctx,
