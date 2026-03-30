@@ -267,6 +267,30 @@ func (d *DB) TopBridges(ctx context.Context, groupID string, n int) ([]EdgeCurva
 	return out, rows.Err()
 }
 
+// EdgeCurvatureMap returns a map of (source_uuid, target_uuid) → curvature
+// for all edges in the group. Used by search to boost bridge edges.
+// Returns nil map (not error) if no curvatures computed yet.
+func (d *DB) EdgeCurvatureMap(ctx context.Context, groupID string) (map[[2]string]float64, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT source_uuid, target_uuid, curvature FROM edge_curvatures WHERE group_id = ?`, groupID)
+	if err != nil {
+		return nil, nil // table might not exist yet
+	}
+	defer rows.Close() //nolint:errcheck
+
+	m := map[[2]string]float64{}
+	for rows.Next() {
+		var src, tgt string
+		var k float64
+		if err := rows.Scan(&src, &tgt, &k); err != nil {
+			return nil, err
+		}
+		m[[2]string{src, tgt}] = k
+		m[[2]string{tgt, src}] = k // symmetric
+	}
+	return m, rows.Err()
+}
+
 // --- Lin-Lu-Yau Curvature ---
 //
 // κ_LLY(u,v) = |△(u,v)| / max(d_u, d_v) + 1/d_u + 1/d_v - 1

@@ -194,6 +194,27 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		}
 	}
 
+	// Signal 5: Curvature bridge boost.
+	// Edges connecting different communities (negative curvature) get a boost
+	// proportional to how "bridge-like" they are. This surfaces cross-domain
+	// connections that FTS and community affinity would miss.
+	curvMap, _ := db.EdgeCurvatureMap(ctx, groupID)
+	if len(curvMap) > 0 {
+		for uuid, e := range edgByUUID {
+			k, ok := curvMap[[2]string{e.SourceUUID, e.TargetUUID}]
+			if !ok {
+				continue
+			}
+			// Boost bridges: κ < -0.3 gets up to +0.10 boost.
+			// Internal edges (κ > 0) get no boost.
+			// Scale: κ=-1.0 → +0.10, κ=-0.3 → +0.00
+			if k < -0.3 {
+				boost := (-k - 0.3) / 0.7 * 0.10
+				rrf["edg:"+uuid] += boost
+			}
+		}
+	}
+
 	type rfentry struct {
 		key   string
 		score float64
