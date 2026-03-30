@@ -14,9 +14,10 @@ const (
 
 // Job is a pending unit of work.
 type Job struct {
-	ID      int64
-	Type    string
-	Payload string // JSON
+	ID       int64
+	Type     string
+	Payload  string // JSON
+	Attempts int
 }
 
 // PushJob enqueues a new job.
@@ -42,8 +43,8 @@ func (d *DB) NextJob(ctx context.Context) (*Job, error) {
 			ORDER BY created_at ASC
 			LIMIT 1
 		)
-		RETURNING id, type, payload`,
-	).Scan(&job.ID, &job.Type, &job.Payload)
+		RETURNING id, type, payload, attempts`,
+	).Scan(&job.ID, &job.Type, &job.Payload, &job.Attempts)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

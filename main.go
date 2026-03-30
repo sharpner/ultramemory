@@ -348,7 +348,7 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 	for i := 0; i < concurrency; i++ {
 		go func() {
 			for job := range jobs {
-				if err := ext.ProcessJob(ctx, job.Payload); err != nil {
+				if err := ext.ProcessJob(ctx, job.Payload, job.Attempts); err != nil {
 					slog.Error("job failed", "id", job.ID, "err", err)
 					if err := db.FailJob(context.Background(), job.ID, err.Error()); err != nil {
 						slog.Error("fail job", "err", err)

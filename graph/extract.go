@@ -52,12 +52,32 @@ func New(db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, reso
 }
 
 // ProcessJob deserialises a queue job and runs the full extraction pipeline.
-func (e *Extractor) ProcessJob(ctx context.Context, payload string) error {
+// attempts indicates how many previous failures occurred — used to increase
+// LLM temperature on retries so the model produces different output.
+func (e *Extractor) ProcessJob(ctx context.Context, payload string, attempts int) error {
 	var p IngestPayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
 		return fmt.Errorf("decode payload: %w", err)
 	}
+
+	// On retries, bump temperature to get different LLM output.
+	// attempt 0 → temp 0 (deterministic), 1 → 0.3, 2 → 0.6
+	temp := float64(attempts) * 0.3
+	if temp > 0.8 {
+		temp = 0.8
+	}
+	e.setExtractorTemperature(temp)
+	defer e.setExtractorTemperature(0) // reset for next job
+
 	return e.Process(ctx, p.Content, p.Source, p.GroupID)
+}
+
+// setExtractorTemperature sets temperature on whichever LLM backend is active.
+func (e *Extractor) setExtractorTemperature(t float64) {
+	type tempSetter interface{ SetTemperature(float64) }
+	if ts, ok := e.extractor.(tempSetter); ok {
+		ts.SetTemperature(t)
+	}
 }
 
 // Process runs entity extraction, edge extraction, and embedding for one text chunk.

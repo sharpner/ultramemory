@@ -225,7 +225,15 @@ type Client struct {
 	extractModel   string
 	embeddingModel string
 	http           *http.Client
+	temperature    float64 // 0 = deterministic (default), >0 for retries
 }
+
+// SetTemperature sets the LLM temperature for subsequent calls.
+// Use 0 for deterministic output, >0 to vary output on retries.
+func (c *Client) SetTemperature(t float64) { c.temperature = t }
+
+// Temperature returns the current temperature setting.
+func (c *Client) Temperature() float64 { return c.temperature }
 
 // New creates a new Ollama client.
 func New(baseURL, extractModel, embeddingModel string) *Client {
@@ -400,6 +408,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 // Uses /api/chat (native) instead of /v1/chat/completions to access keep_alive,
 // cache_prompt and num_ctx — Ollama-native params not available via OpenAI-compat layer.
 func (c *Client) chat(ctx context.Context, model, system, user string) (string, time.Duration, error) {
+	temp := c.Temperature()
 	body := map[string]any{
 		"model": model,
 		"messages": []map[string]string{
@@ -414,8 +423,12 @@ func (c *Client) chat(ctx context.Context, model, system, user string) (string, 
 		"options": map[string]any{
 			"num_ctx":     8192, // must match Answer's num_ctx — Ollama pins KV cache at first load
 			"num_predict": 4096, // max output tokens
-			"temperature": 0,
+			"temperature": temp,
 		},
+	}
+	if temp > 0 {
+		// Disable prompt caching on retries — different temperature means different output.
+		body["cache_prompt"] = false
 	}
 
 	raw, _ := json.Marshal(body)

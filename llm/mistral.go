@@ -27,10 +27,17 @@ type EntityExtractor interface {
 
 // MistralClient calls the Mistral API (OpenAI-compatible) for QA answering or judging.
 type MistralClient struct {
-	model  string
-	apiKey string
-	http   *http.Client
+	model       string
+	apiKey      string
+	http        *http.Client
+	temperature float64
 }
+
+// SetTemperature sets the LLM temperature for subsequent calls.
+func (m *MistralClient) SetTemperature(t float64) { m.temperature = t }
+
+// Temperature returns the current temperature setting.
+func (m *MistralClient) Temperature() float64 { return m.temperature }
 
 // NewMistral creates a Mistral client (QA answering or judge).
 func NewMistral(apiKey, model string) *MistralClient {
@@ -174,7 +181,7 @@ func (m *MistralClient) mistralChat(ctx context.Context, system, user string, js
 			{"role": "user", "content": user},
 		},
 		"max_tokens":  4096,
-		"temperature": 0,
+		"temperature": m.temperature,
 	}
 	if jsonMode {
 		body["response_format"] = map[string]string{"type": "json_object"}
