@@ -125,6 +125,14 @@ const migrations = `
 ALTER TABLE entities ADD COLUMN community_id INTEGER NOT NULL DEFAULT -1;
 ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_entities_community ON entities(group_id, community_id);
+CREATE TABLE IF NOT EXISTS edge_curvatures (
+	source_uuid TEXT NOT NULL,
+	target_uuid TEXT NOT NULL,
+	group_id    TEXT NOT NULL,
+	curvature   REAL NOT NULL,
+	PRIMARY KEY (source_uuid, target_uuid, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_curvatures_group ON edge_curvatures(group_id, curvature);
 `
 
 // DB wraps a SQLite database connection.

@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -268,6 +269,53 @@ func main() {
 			}
 		}
 		printCommunities(ctx, db, groupID, *format, *minMembers)
+
+	case "curvature":
+		fs := flag.NewFlagSet("curvature", flag.ExitOnError)
+		persist := fs.Bool("store", false, "persist curvatures to edge_curvatures table")
+		bridges := fs.Int("bridges", 0, "show top N bridge edges (most negative curvature)")
+		format := fs.String("format", "text", "output format: text|json")
+		_ = fs.Parse(os.Args[2:])
+
+		// If -bridges without computation, just query stored curvatures.
+		if *bridges > 0 && !*persist {
+			top, err := db.TopBridges(ctx, groupID, *bridges)
+			if err == nil && len(top) > 0 {
+				printBridges(top, *format)
+				break
+			}
+		}
+
+		fmt.Fprintln(os.Stderr, "Computing Lin-Lu-Yau curvatures…")
+		curvatures, stats, err := db.ComputeCurvatures(ctx, groupID, 0)
+		must(err, "compute curvatures")
+		printCurvatureStats(stats, *format)
+
+		if *persist {
+			fmt.Fprintln(os.Stderr, "Storing curvatures…")
+			must(db.StoreCurvatures(ctx, groupID, curvatures), "store curvatures")
+			fmt.Fprintf(os.Stderr, "✓ %d curvatures stored\n", len(curvatures))
+		}
+
+		if *bridges > 0 {
+			top, err := db.TopBridges(ctx, groupID, *bridges)
+			if err == nil {
+				printBridges(top, *format)
+				break
+			}
+			// Fall back to in-memory sort.
+			slices.SortFunc(curvatures, func(a, b store.EdgeCurvature) int {
+				if a.Curvature < b.Curvature {
+					return -1
+				}
+				if a.Curvature > b.Curvature {
+					return 1
+				}
+				return 0
+			})
+			n := min(*bridges, len(curvatures))
+			printBridges(curvatures[:n], *format)
+		}
 
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
@@ -533,6 +581,7 @@ func usage() {
   retry            requeue all failed jobs for reprocessing
   resolve          merge near-duplicate entities (flags: -dry-run, -threshold 0.85)
   communities      detect + list communities (Louvain)          (flags: -format, -resolution)
+  curvature        compute Ollivier-Ricci edge curvatures       (flags: -alpha, -store, -bridges N)
   bench   <json>   evaluate against LoCoMo benchmark (flags: -limit N, -baseline)
   status           show queue and graph statistics
 
@@ -574,6 +623,54 @@ func recoverStaleJobs(ctx context.Context, db *store.DB) {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+func printCurvatureStats(stats store.CurvatureStats, format string) {
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(stats) //nolint:errcheck
+		return
+	}
+	fmt.Printf("\nOllivier-Ricci Curvature Statistics\n")
+	fmt.Printf("───────────────────────────────────\n")
+	fmt.Printf("  Total edges:   %d\n", stats.TotalEdges)
+	fmt.Printf("  Bridges (κ<0): %d (%.1f%%)\n", stats.Bridges, pct(stats.Bridges, stats.TotalEdges))
+	fmt.Printf("  Internal (κ>0):%d (%.1f%%)\n", stats.Internal, pct(stats.Internal, stats.TotalEdges))
+	fmt.Printf("  Flat (|κ|<.05):%d (%.1f%%)\n", stats.Flat, pct(stats.Flat, stats.TotalEdges))
+	fmt.Printf("  Mean κ:        %.4f\n", stats.Mean)
+	fmt.Printf("  Min κ:         %.4f\n", stats.Min)
+	fmt.Printf("  Max κ:         %.4f\n", stats.Max)
+	fmt.Printf("  Elapsed:       %s\n", stats.Elapsed)
+}
+
+func printBridges(bridges []store.EdgeCurvature, format string) {
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(bridges) //nolint:errcheck
+		return
+	}
+	fmt.Printf("\nTop Bridge Edges (most negative curvature)\n")
+	fmt.Printf("───────────────────────────────────────────\n")
+	for i, b := range bridges {
+		src := b.SourceName
+		if src == "" {
+			src = b.SourceUUID[:min(8, len(b.SourceUUID))]
+		}
+		tgt := b.TargetName
+		if tgt == "" {
+			tgt = b.TargetUUID[:min(8, len(b.TargetUUID))]
+		}
+		fmt.Printf("  %3d. κ=%+.4f  %s ↔ %s\n", i+1, b.Curvature, src, tgt)
+	}
+}
+
+func pct(n, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(n) / float64(total) * 100
 }
 
 // rejectTrailingFlags detects flags placed after the positional path argument
