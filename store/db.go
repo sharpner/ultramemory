@@ -112,9 +112,6 @@ CREATE INDEX IF NOT EXISTS idx_edges_tgt_grp
 CREATE INDEX IF NOT EXISTS idx_edges_group
 	ON edges(group_id);
 
-CREATE INDEX IF NOT EXISTS idx_entities_community
-	ON entities(group_id, community_id);
-
 CREATE TABLE IF NOT EXISTS community_reports (
 	community_id INTEGER NOT NULL,
 	group_id     TEXT NOT NULL,
@@ -127,6 +124,7 @@ CREATE TABLE IF NOT EXISTS community_reports (
 const migrations = `
 ALTER TABLE entities ADD COLUMN community_id INTEGER NOT NULL DEFAULT -1;
 ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_entities_community ON entities(group_id, community_id);
 `
 
 // DB wraps a SQLite database connection.
@@ -166,8 +164,8 @@ func buildDSN(path string) string {
 	return "file:" + url.PathEscape(path) + "?" + params.Encode()
 }
 
-// runMigrations executes each ALTER TABLE statement individually.
-// "duplicate column" errors are expected (column already added) and ignored;
+// runMigrations executes each migration statement individually.
+// Expected errors (duplicate column, already-existing index) are ignored;
 // all other errors are fatal.
 func runMigrations(conn *sql.DB) error {
 	for _, m := range strings.Split(migrations, ";") {
@@ -176,9 +174,14 @@ func runMigrations(conn *sql.DB) error {
 			continue
 		}
 		_, err := conn.ExecContext(context.Background(), m)
-		if err != nil && !strings.Contains(err.Error(), "duplicate column") {
-			return fmt.Errorf("migration %q: %w", m, err)
+		if err == nil {
+			continue
 		}
+		msg := err.Error()
+		if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+			continue
+		}
+		return fmt.Errorf("migration %q: %w", m, err)
 	}
 	return nil
 }
