@@ -68,6 +68,10 @@ ultramemory worker             # process queue (runs until Ctrl+C)
 ultramemory ingest -source "https://arxiv.org/abs/2511.01815" ./paper/
 ultramemory run -source "https://arxiv.org/abs/2511.01815" ./paper/
 
+# Cloud extraction via Mistral API (much faster, requires API key)
+MISTRAL_API_KEY=sk-... MEMORY_EXTRACT_PROVIDER=mistral \
+  MEMORY_MODEL=ministral-8b-latest ultramemory run ./my-docs
+
 # Search the graph
 ultramemory search "Alice Schmidt TechCorp"
 
@@ -90,6 +94,24 @@ ultramemory status
 | `MEMORY_GROUP`     | `default`                 | Namespace for graph isolation    |
 | `MEMORY_RESOLVE_THRESHOLD` | `0.92`          | Cosine similarity threshold for entity deduplication (0–1) |
 | `MEMORY_LLM_PARALLEL`       | `1`           | Concurrent extraction calls (match `OLLAMA_NUM_PARALLEL`) |
+| `MEMORY_EXTRACT_PROVIDER` | `ollama`        | Extraction backend: `ollama` (local) or `mistral` (API) |
+| `MISTRAL_API_KEY`         |                 | Mistral API key (required when provider=mistral) |
+
+### Mistral API mode
+
+Use `MEMORY_EXTRACT_PROVIDER=mistral` to run entity/edge extraction via Mistral's API instead of local Ollama. Embedding stays local (mxbai-embed-large via Ollama). This is useful for:
+
+- **Bulk ingestion** — API handles concurrent requests, default `MEMORY_LLM_PARALLEL=4`
+- **Faster models** — `ministral-3b-latest` (~1s/chunk) or `ministral-8b-latest` (~3s/chunk)
+- **No GPU needed** for extraction (only embedding needs Ollama)
+
+```bash
+export MISTRAL_API_KEY=sk-...
+export MEMORY_EXTRACT_PROVIDER=mistral
+export MEMORY_MODEL=ministral-8b-latest   # or ministral-3b-latest for speed
+
+ultramemory run ./papers/
+```
 
 ## JSON API
 
