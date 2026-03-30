@@ -495,18 +495,33 @@ func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 				stats[s] = 0
 			}
 		}
+		curvTotal, curvBridges, curvInternal, curvMean := db.CurvatureStatus(ctx, groupID)
 		out := struct {
 			Graph struct {
 				Episodes int `json:"episodes"`
 				Entities int `json:"entities"`
 				Edges    int `json:"edges"`
 			} `json:"graph"`
+			Curvature *struct {
+				Edges    int     `json:"edges"`
+				Bridges  int     `json:"bridges"`
+				Internal int     `json:"internal"`
+				Mean     float64 `json:"mean"`
+			} `json:"curvature,omitempty"`
 			Queue map[string]int `json:"queue"`
 		}{}
 		out.Graph.Episodes = episodes
 		out.Graph.Entities = entities
 		out.Graph.Edges = edges
 		out.Queue = stats
+		if curvTotal > 0 {
+			out.Curvature = &struct {
+				Edges    int     `json:"edges"`
+				Bridges  int     `json:"bridges"`
+				Internal int     `json:"internal"`
+				Mean     float64 `json:"mean"`
+			}{curvTotal, curvBridges, curvInternal, curvMean}
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(out)
 		return
 	}
@@ -515,6 +530,16 @@ func printStatus(ctx context.Context, db *store.DB, groupID, format string) {
 	fmt.Printf("  episodes : %d\n", episodes)
 	fmt.Printf("  entities : %d\n", entities)
 	fmt.Printf("  edges    : %d\n", edges)
+
+	curvTotal, curvBridges, curvInternal, curvMean := db.CurvatureStatus(ctx, groupID)
+	if curvTotal > 0 {
+		fmt.Printf("\n── Curvature ──────────────\n")
+		fmt.Printf("  edges    : %d\n", curvTotal)
+		fmt.Printf("  bridges  : %d (%.0f%%)\n", curvBridges, pct(curvBridges, curvTotal))
+		fmt.Printf("  internal : %d (%.0f%%)\n", curvInternal, pct(curvInternal, curvTotal))
+		fmt.Printf("  mean κ   : %.3f\n", curvMean)
+	}
+
 	fmt.Printf("\n── Queue ──────────────────\n")
 	for _, s := range []string{"pending", "processing", "done", "failed"} {
 		fmt.Printf("  %-10s : %d\n", s, stats[s])

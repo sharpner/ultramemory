@@ -267,6 +267,19 @@ func (d *DB) TopBridges(ctx context.Context, groupID string, n int) ([]EdgeCurva
 	return out, rows.Err()
 }
 
+// CurvatureStatus returns quick stats about stored curvatures for the status command.
+// Returns zero values if no curvatures computed yet.
+func (d *DB) CurvatureStatus(ctx context.Context, groupID string) (total, bridges, internal int, mean float64) {
+	row := d.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       SUM(CASE WHEN curvature < -0.05 THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN curvature > 0.05 THEN 1 ELSE 0 END),
+		       COALESCE(AVG(curvature), 0)
+		FROM edge_curvatures WHERE group_id = ?`, groupID)
+	_ = row.Scan(&total, &bridges, &internal, &mean)
+	return
+}
+
 // EdgeCurvatureMap returns a map of (source_uuid, target_uuid) → curvature
 // for all edges in the group. Used by search to boost bridge edges.
 // Returns nil map (not error) if no curvatures computed yet.
