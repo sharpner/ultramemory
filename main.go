@@ -211,6 +211,11 @@ func main() {
 			qaAnswerer = llm.NewMistral(mistralKey, *qaModel)
 			slog.Info("QA answerer", "model", *qaModel, "provider", "mistral")
 		}
+		// When extraction runs via Mistral API, QA should too (Ollama doesn't have the model).
+		if qaAnswerer == nil && extractProvider == "mistral" {
+			qaAnswerer = llm.NewMistral(mistralKey, extractModel)
+			slog.Info("QA answerer", "model", extractModel, "provider", "mistral (auto)")
+		}
 
 		var judge bench.Judge
 		if *judgeModel != "" {
