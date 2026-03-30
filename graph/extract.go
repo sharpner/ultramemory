@@ -22,27 +22,30 @@ type IngestPayload struct {
 }
 
 // Extractor runs the full graph-building pipeline for a document chunk.
-// The semaphore limits concurrent extraction (gemma3) calls.
-// Embedding (mxbai) runs outside the semaphore since it uses a different model.
+// The semaphore limits concurrent extraction calls.
+// Embedding (mxbai via Ollama) runs outside the semaphore since it uses a different model.
 type Extractor struct {
 	db               *store.DB
-	llm              *llm.Client
-	sem              chan struct{} // limits concurrent LLM extraction calls
-	muEntity         sync.Mutex   // serialise entity upserts to avoid duplicates under concurrency
-	embedWG          sync.WaitGroup // tracks in-flight embedding goroutines
+	extractor        llm.EntityExtractor // entity/edge extraction (Ollama or Mistral API)
+	embedder         *llm.Client         // embeddings always via local Ollama
+	sem              chan struct{}        // limits concurrent LLM extraction calls
+	muEntity         sync.Mutex          // serialise entity upserts to avoid duplicates under concurrency
+	embedWG          sync.WaitGroup      // tracks in-flight embedding goroutines
 	resolveThreshold float64
 }
 
-// New creates a new Extractor. llmParallel controls how many concurrent extraction
-// calls are allowed (match with OLLAMA_NUM_PARALLEL). resolveThreshold is the
-// minimum cosine similarity for entity deduplication (e.g. 0.92).
-func New(db *store.DB, client *llm.Client, resolveThreshold float64, llmParallel int) *Extractor {
+// New creates a new Extractor. extractor handles entity/edge extraction (Ollama or Mistral API).
+// embedder handles embeddings and must always be the local Ollama client.
+// llmParallel controls how many concurrent extraction calls are allowed.
+// resolveThreshold is the minimum cosine similarity for entity deduplication (e.g. 0.92).
+func New(db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, resolveThreshold float64, llmParallel int) *Extractor {
 	if llmParallel < 1 {
 		llmParallel = 1
 	}
 	return &Extractor{
 		db:               db,
-		llm:              client,
+		extractor:        extractor,
+		embedder:         embedder,
 		sem:              make(chan struct{}, llmParallel),
 		resolveThreshold: resolveThreshold,
 	}
@@ -83,7 +86,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 	start := time.Now()
 
 	// ── 3. Entity extraction ─────────────────────────────────────────────────
-	extracted, err := e.llm.ExtractEntities(ctx, content)
+	extracted, err := e.extractor.ExtractEntities(ctx, content)
 	if err != nil {
 		<-e.sem
 		return fmt.Errorf("extract entities: %w", err)
@@ -96,7 +99,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 	}
 
 	// ── 4. Edge extraction ───────────────────────────────────────────────────
-	edges, err := e.llm.ExtractEdges(ctx, extracted.Entities, content)
+	edges, err := e.extractor.ExtractEdges(ctx, extracted.Entities, content)
 	if err != nil {
 		<-e.sem
 		return fmt.Errorf("extract edges: %w", err)
@@ -129,7 +132,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		}
 	}
 
-	batchEmbs, batchErr := e.llm.EmbedBatch(ctx, batchTexts)
+	batchEmbs, batchErr := e.embedder.EmbedBatch(ctx, batchTexts)
 	if batchErr != nil {
 		slog.Debug("embed batch failed, falling back to sequential", "err", batchErr)
 		batchEmbs = nil // signals fallback below
@@ -152,7 +155,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 			if t == "" {
 				t = entityEmbedText(ent.Name, ent.EntityType)
 			}
-			vec, err = e.llm.Embed(ctx, t)
+			vec, err = e.embedder.Embed(ctx, t)
 			if err != nil {
 				slog.Debug("embed entity failed", "name", ent.Name, "err", err)
 				vec = nil
@@ -184,7 +187,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		edgeEmb := embAt(entCount + ei)
 		if edgeEmb == nil && ex.Fact != "" {
 			// Batch failed — fall back to single embed.
-			edgeEmb, err = e.llm.Embed(ctx, ex.Fact)
+			edgeEmb, err = e.embedder.Embed(ctx, ex.Fact)
 			if err != nil {
 				slog.Debug("embed edge fact failed", "fact", ex.Fact, "err", err)
 			}
@@ -247,7 +250,7 @@ func (e *Extractor) resolveOrCreate(ctx context.Context, name, entityType, group
 
 func (e *Extractor) embedEpisode(ctx context.Context, uuid, content string) {
 	defer e.embedWG.Done()
-	vec, err := e.llm.Embed(ctx, content)
+	vec, err := e.embedder.Embed(ctx, content)
 	if err != nil {
 		slog.Debug("embed episode failed", "err", err)
 		return
