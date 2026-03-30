@@ -221,7 +221,7 @@ func main() {
 			slog.Info("LLM judge", "model", *judgeModel, "provider", "mistral")
 		}
 
-		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, client, qaAnswerer, judge, resolveThreshold, *limit, *baseline, *qaOnly)
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, extractor, client, qaAnswerer, judge, resolveThreshold, *limit, *baseline, *qaOnly)
 		must(err, "bench")
 		bench.PrintResult(result)
 

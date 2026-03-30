@@ -164,7 +164,7 @@ type Judge interface {
 // qaAnswerer overrides the QA answering model when set (extraction always uses client).
 // When qaOnly is true, ingestion is skipped — DB must already be populated.
 // judge optionally evaluates each answer for semantic correctness (LLM-as-judge).
-func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.Client, qaAnswerer llm.Answerer, judge Judge, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
+func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm.EntityExtractor, client *llm.Client, qaAnswerer llm.Answerer, judge Judge, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
 	conversations, err := parseLoCoMo(dataPath)
 	if err != nil {
 		return nil, err
@@ -222,7 +222,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, client *llm.C
 							slog.Warn("episode insert failed", "err", err)
 						}
 					} else {
-						ext := graph.New(db, client, client, resolveThreshold, 1)
+						ext := graph.New(db, extractor, client, resolveThreshold, 1)
 						if err := ext.Process(ctx, chunk, source, groupID); err != nil {
 							slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
 						}
