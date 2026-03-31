@@ -193,6 +193,14 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 		if err := e.db.LinkEntityEpisode(ctx, canonical, epUUID); err != nil {
 			return fmt.Errorf("link entity-episode: %w", err)
 		}
+
+		// Incremental mutual-kNN update: integrate new entity into the
+		// semantic neighbor graph. Cost: O(n × d), ~100ms at 100k entities.
+		if vec != nil {
+			if err := e.db.UpdateMutualKNN(ctx, canonical, groupID, vec, 20); err != nil {
+				slog.Debug("mutual-knn update failed", "entity", ent.Name, "err", err)
+			}
+		}
 	}
 
 	// ── 7. Store edges (embeddings from batch, fallback to sequential) ────────
