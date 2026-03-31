@@ -10,6 +10,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gonum.org/v1/gonum/graph/community"
+	"gonum.org/v1/gonum/graph/simple"
 )
 
 // EdgeCurvature holds the Ollivier-Ricci curvature for one entity pair.
@@ -301,6 +304,157 @@ func (d *DB) EdgeCurvatureMap(ctx context.Context, groupID string) (map[[2]strin
 		m[[2]string{tgt, src}] = k // symmetric
 	}
 	return m, rows.Err()
+}
+
+// CurvatureWeightedLouvain runs Louvain community detection with ORC as edge weights.
+// This is the spin-glass approach: κ(u,v) acts as the coupling constant J_ij.
+// Positive curvature = strong coupling (stay together), negative = weak (allow separation).
+//
+// Edge weight = max(0, κ + offset) where offset shifts all curvatures to non-negative.
+// Edges with very negative curvature get weight ≈ 0 (effectively ignored by Louvain).
+func (d *DB) CurvatureWeightedLouvain(ctx context.Context, groupID string, resolution float64) (CommunityResult, error) {
+	if resolution <= 0 {
+		resolution = 1.0
+	}
+
+	// 1. Compute curvatures.
+	curvatures, stats, err := d.ComputeCurvatures(ctx, groupID, 0)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("compute curvatures: %w", err)
+	}
+	if err := d.StoreCurvatures(ctx, groupID, curvatures); err != nil {
+		return CommunityResult{}, fmt.Errorf("store curvatures: %w", err)
+	}
+
+	// 2. Build UUID→curvature map.
+	uuidCurvMap := map[[2]string]float64{}
+	for _, cv := range curvatures {
+		uuidCurvMap[[2]string{cv.SourceUUID, cv.TargetUUID}] = cv.Curvature
+		uuidCurvMap[[2]string{cv.TargetUUID, cv.SourceUUID}] = cv.Curvature
+	}
+
+	// 3. Load entities.
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT uuid FROM entities WHERE group_id = ?`, groupID)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("load entities: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	uuidToID := map[string]int64{}
+	idToUUID := map[int64]string{}
+	var nextID int64
+	for rows.Next() {
+		var uuid string
+		if err := rows.Scan(&uuid); err != nil {
+			return CommunityResult{}, err
+		}
+		uuidToID[uuid] = nextID
+		idToUUID[nextID] = uuid
+		nextID++
+	}
+	if err := rows.Err(); err != nil {
+		return CommunityResult{}, err
+	}
+
+	// 4. Build weighted graph with curvature as edge weight.
+	g := simple.NewWeightedUndirectedGraph(0, 0)
+	for id := int64(0); id < nextID; id++ {
+		g.AddNode(simple.Node(id))
+	}
+
+	// Offset: shift curvatures so minimum becomes ε > 0.
+	// This preserves relative ordering while making all weights positive.
+	offset := -stats.Min + 0.01
+	slog.Info("curvature-weighted louvain",
+		"offset", fmt.Sprintf("%.2f", offset),
+		"min_κ", fmt.Sprintf("%.2f", stats.Min),
+		"max_κ", fmt.Sprintf("%.2f", stats.Max),
+	)
+
+	edgeWeights := map[[2]int64]float64{}
+	edgeRows, err := d.sql.QueryContext(ctx,
+		`SELECT source_uuid, target_uuid FROM edges WHERE group_id = ?`, groupID)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("load edges: %w", err)
+	}
+	defer edgeRows.Close() //nolint:errcheck
+
+	for edgeRows.Next() {
+		var src, tgt string
+		if err := edgeRows.Scan(&src, &tgt); err != nil {
+			return CommunityResult{}, err
+		}
+		srcID, ok1 := uuidToID[src]
+		tgtID, ok2 := uuidToID[tgt]
+		if !ok1 || !ok2 || srcID == tgtID {
+			continue
+		}
+		key := [2]int64{srcID, tgtID}
+		if srcID > tgtID {
+			key = [2]int64{tgtID, srcID}
+		}
+		// Use curvature as weight (shifted to positive).
+		k, ok := uuidCurvMap[[2]string{src, tgt}]
+		if !ok {
+			k = 0 // edges without curvature get neutral weight
+		}
+		w := k + offset
+		if w < 0.01 {
+			w = 0.01 // ensure positive
+		}
+		// Accumulate (multiple edges between same pair).
+		edgeWeights[key] += w
+	}
+	if err := edgeRows.Err(); err != nil {
+		return CommunityResult{}, err
+	}
+
+	for key, w := range edgeWeights {
+		g.SetWeightedEdge(g.NewWeightedEdge(simple.Node(key[0]), simple.Node(key[1]), w))
+	}
+
+	// 5. Run Louvain with curvature-informed weights.
+	reduced := community.Modularize(g, resolution, nil)
+	communities := reduced.Communities()
+
+	// 6. Write community_id.
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE entities SET community_id = ? WHERE uuid = ? AND group_id = ?`)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close() //nolint:errcheck
+
+	for communityID, members := range communities {
+		for _, node := range members {
+			uuid := idToUUID[node.ID()]
+			if _, err := stmt.ExecContext(ctx, communityID, uuid, groupID); err != nil {
+				return CommunityResult{}, fmt.Errorf("update community: %w", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return CommunityResult{}, fmt.Errorf("commit: %w", err)
+	}
+
+	slog.Info("curvature-weighted louvain complete",
+		"group", groupID,
+		"entities", nextID,
+		"communities", len(communities),
+	)
+
+	return CommunityResult{
+		Communities: len(communities),
+		Entities:    int(nextID),
+	}, nil
 }
 
 // RicciFlowCommunities detects communities via iterative Ricci flow:
