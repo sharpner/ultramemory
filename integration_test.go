@@ -79,7 +79,7 @@ func TestIntegrationIngestAndSearch(t *testing.T) {
 		if job == nil {
 			break // queue empty
 		}
-		if err := ext.ProcessJob(ctx, job.Payload); err != nil {
+		if err := ext.ProcessJob(ctx, job.Payload, job.Attempts); err != nil {
 			t.Logf("job %d failed: %v", job.ID, err)
 			if err2 := db.FailJob(ctx, job.ID, err.Error()); err2 != nil {
 				t.Fatalf("fail job: %v", err2)
