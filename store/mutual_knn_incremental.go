@@ -55,8 +55,37 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 		return nil // not enough entities yet
 	}
 
-	// 2. Normalize new embedding.
-	newNorm := normalizeVec(newEmb)
+	// 2. Normalize all embeddings once up front.
+	normalizeInPlace := func(v []float32) {
+		var sum float64
+		for _, x := range v {
+			sum += float64(x) * float64(x)
+		}
+		if sum == 0 {
+			return
+		}
+		norm := float32(math.Sqrt(sum))
+		for i := range v {
+			v[i] /= norm
+		}
+	}
+
+	newNorm := make([]float32, len(newEmb))
+	copy(newNorm, newEmb)
+	normalizeInPlace(newNorm)
+
+	for i := range existing {
+		normalizeInPlace(existing[i].emb)
+	}
+
+	// dot computes dot product of two pre-normalized vectors.
+	dot := func(a, b []float32) float32 {
+		s := float32(0)
+		for i := range a {
+			s += a[i] * b[i]
+		}
+		return s
+	}
 
 	// 3. Find top-k neighbors of the new entity.
 	type scored struct {
@@ -65,7 +94,7 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 	}
 	topk := make([]scored, 0, k)
 	for i, e := range existing {
-		sim := dotF32(newNorm, normalizeVec(e.emb))
+		sim := dot(newNorm, e.emb)
 		if len(topk) < k {
 			topk = append(topk, scored{i, sim})
 			if len(topk) == k {
@@ -93,11 +122,11 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 	}
 
 	// 4. Mutual check: for each candidate, is newUUID also in their top-k?
-	// Compute candidate's actual top-k similarities to find the k-th threshold.
+	// Embeddings are already normalized — use dot product directly.
 	var mutualEdges [][2]string
 	for _, candIdx := range newNeighborIdxs {
-		candNorm := normalizeVec(existing[candIdx].emb)
-		simToNew := dotF32(candNorm, newNorm)
+		candEmb := existing[candIdx].emb
+		simToNew := dot(candEmb, newNorm)
 
 		// Build candidate's top-k (same algorithm as step 3).
 		candTopK := make([]scored, 0, k)
@@ -105,7 +134,7 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 			if j == candIdx {
 				continue
 			}
-			sim := dotF32(candNorm, normalizeVec(e.emb))
+			sim := dot(candEmb, e.emb)
 			if len(candTopK) < k {
 				candTopK = append(candTopK, scored{j, sim})
 				if len(candTopK) == k {
@@ -145,7 +174,7 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 	defer tx.Rollback() //nolint:errcheck
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT OR IGNORE INTO mutual_knn_edges (source_id, target_id, source_uuid, target_uuid, group_id) VALUES (0, 0, ?, ?, ?)`)
+		`INSERT OR IGNORE INTO mutual_knn_edges (source_uuid, target_uuid, group_id) VALUES (?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -168,28 +197,4 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 	)
 
 	return nil
-}
-
-func normalizeVec(v []float32) []float32 {
-	var sum float64
-	for _, x := range v {
-		sum += float64(x) * float64(x)
-	}
-	if sum == 0 {
-		return v
-	}
-	norm := float32(math.Sqrt(sum))
-	out := make([]float32, len(v))
-	for i, x := range v {
-		out[i] = x / norm
-	}
-	return out
-}
-
-func dotF32(a, b []float32) float32 {
-	s := float32(0)
-	for i := range a {
-		s += a[i] * b[i]
-	}
-	return s
 }

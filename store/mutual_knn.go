@@ -6,10 +6,9 @@ import (
 	"log/slog"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
-
-	"sort"
 
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
@@ -118,7 +117,7 @@ func (d *DB) storeMutualKNNCache(ctx context.Context, groupID string, g *adjGrap
 	}
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO mutual_knn_edges (source_id, target_id, source_uuid, target_uuid, group_id) VALUES (?, ?, ?, ?, ?)`)
+		`INSERT INTO mutual_knn_edges (source_uuid, target_uuid, group_id) VALUES (?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -136,7 +135,7 @@ func (d *DB) storeMutualKNNCache(ctx context.Context, groupID string, g *adjGrap
 				continue
 			}
 			seen[ep] = true
-			if _, err := stmt.ExecContext(ctx, lo, hi, idToUUID[lo], idToUUID[hi], groupID); err != nil {
+			if _, err := stmt.ExecContext(ctx, idToUUID[lo], idToUUID[hi], groupID); err != nil {
 				return err
 			}
 		}
@@ -241,7 +240,15 @@ func (d *DB) computeMutualKNN(ctx context.Context, groupID string, k int) (*adjG
 					if len(topk) < k {
 						topk = append(topk, scored{j, sim})
 						if len(topk) == k {
-							sort.Slice(topk, func(a, b int) bool { return topk[a].sim > topk[b].sim })
+							slices.SortFunc(topk, func(a, b scored) int {
+								if a.sim > b.sim {
+									return -1
+								}
+								if a.sim < b.sim {
+									return 1
+								}
+								return 0
+							})
 						}
 					} else if sim > topk[k-1].sim {
 						topk[k-1] = scored{j, sim}
@@ -430,30 +437,17 @@ func (d *DB) MutualKNNCommunities(ctx context.Context, groupID string, k int, re
 	communities := reduced.Communities()
 
 	// 6. Write community_id to entities table.
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return CommunityResult{}, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	stmt, err := tx.PrepareContext(ctx,
-		`UPDATE entities SET community_id = ? WHERE uuid = ? AND group_id = ?`)
-	if err != nil {
-		return CommunityResult{}, fmt.Errorf("prepare: %w", err)
-	}
-	defer stmt.Close() //nolint:errcheck
-
+	communityMap := make(map[int64][]string, len(communities))
 	for cid, members := range communities {
+		uuidList := make([]string, 0, len(members))
 		for _, node := range members {
-			uuid := idToUUID[node.ID()]
-			if _, err := stmt.ExecContext(ctx, cid, uuid, groupID); err != nil {
-				return CommunityResult{}, fmt.Errorf("update community: %w", err)
-			}
+			uuidList = append(uuidList, idToUUID[node.ID()])
 		}
+		communityMap[int64(cid)] = uuidList
 	}
 
-	if err := tx.Commit(); err != nil {
-		return CommunityResult{}, fmt.Errorf("commit: %w", err)
+	if err := d.WriteCommunityIDs(ctx, groupID, communityMap); err != nil {
+		return CommunityResult{}, err
 	}
 
 	slog.Info("mutual-knn-communities: complete",
@@ -465,4 +459,14 @@ func (d *DB) MutualKNNCommunities(ctx context.Context, groupID string, k int, re
 		Communities: len(communities),
 		Entities:    int(nodeCount),
 	}, nil
+}
+
+// dotF32 computes the dot product of two float32 slices.
+// Called on pre-normalized embeddings for cosine similarity.
+func dotF32(a, b []float32) float32 {
+	s := float32(0)
+	for i := range a {
+		s += a[i] * b[i]
+	}
+	return s
 }

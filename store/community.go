@@ -103,30 +103,17 @@ func (d *DB) DetectCommunities(ctx context.Context, groupID string, resolution f
 	communities := reduced.Communities()
 
 	// ── 4. Write community_id back to database ───────────────────────────────
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return CommunityResult{}, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	stmt, err := tx.PrepareContext(ctx,
-		`UPDATE entities SET community_id = ? WHERE uuid = ? AND group_id = ?`)
-	if err != nil {
-		return CommunityResult{}, fmt.Errorf("prepare: %w", err)
-	}
-	defer stmt.Close() //nolint:errcheck
-
+	communityMap := make(map[int64][]string, len(communities))
 	for communityID, members := range communities {
+		uuidList := make([]string, 0, len(members))
 		for _, node := range members {
-			uuid := idToUUID[node.ID()]
-			if _, err := stmt.ExecContext(ctx, communityID, uuid, groupID); err != nil {
-				return CommunityResult{}, fmt.Errorf("update community: %w", err)
-			}
+			uuidList = append(uuidList, idToUUID[node.ID()])
 		}
+		communityMap[int64(communityID)] = uuidList
 	}
 
-	if err := tx.Commit(); err != nil {
-		return CommunityResult{}, fmt.Errorf("commit: %w", err)
+	if err := d.WriteCommunityIDs(ctx, groupID, communityMap); err != nil {
+		return CommunityResult{}, err
 	}
 
 	slog.Info("community detection complete",
@@ -329,6 +316,33 @@ func (d *DB) ListCommunities(ctx context.Context, groupID string) ([]CommunitySu
 		result[i] = *byID[cid]
 	}
 	return result, nil
+}
+
+// WriteCommunityIDs writes community assignments to the entities table.
+// communities maps community ID → list of entity UUIDs.
+func (d *DB) WriteCommunityIDs(ctx context.Context, groupID string, communities map[int64][]string) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE entities SET community_id = ? WHERE uuid = ? AND group_id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close() //nolint:errcheck
+
+	for cid, uuids := range communities {
+		for _, uuid := range uuids {
+			if _, err := stmt.ExecContext(ctx, cid, uuid, groupID); err != nil {
+				return fmt.Errorf("update community: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 // StoreCommunityReport persists a generated report for a community.
