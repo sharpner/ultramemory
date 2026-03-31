@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coder/hnsw"
+	"sort"
+
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
 )
@@ -19,8 +20,133 @@ import (
 // Edge (i,j) exists only if BOTH i ∈ kNN(j) AND j ∈ kNN(i).
 // This eliminates hub nodes (arXiv: 1895→4) while preserving semantic clusters.
 //
+// Uses cached edges from mutual_knn_edges table if available.
+// Falls back to full brute-force computation if cache is empty.
+//
 // Returns an adjGraph with sorted neighbor lists, ready for ORC computation.
 func (d *DB) MutualKNNGraph(ctx context.Context, groupID string, k int) (*adjGraph, map[int64]string, int64, error) {
+	// Try loading from cache first.
+	g, idToUUID, n, err := d.loadCachedMutualKNN(ctx, groupID)
+	if err == nil && n > 0 {
+		slog.Info("mutual-knn: loaded from cache", "entities", n, "edges", len(g.neighbors)/2)
+		return g, idToUUID, n, nil
+	}
+
+	// Cache miss — compute from scratch.
+	g, idToUUID, n, err = d.computeMutualKNN(ctx, groupID, k)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	// Store in cache for next time.
+	if err := d.storeMutualKNNCache(ctx, groupID, g, idToUUID, n); err != nil {
+		slog.Warn("mutual-knn: cache store failed", "err", err)
+	}
+
+	return g, idToUUID, n, nil
+}
+
+func (d *DB) loadCachedMutualKNN(ctx context.Context, groupID string) (*adjGraph, map[int64]string, int64, error) {
+	// Load all entities for UUID mapping.
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT uuid FROM entities WHERE group_id = ? AND embedding IS NOT NULL`, groupID)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	uuidToID := map[string]int64{}
+	idToUUID := map[int64]string{}
+	var nextID int64
+	for rows.Next() {
+		var uuid string
+		if err := rows.Scan(&uuid); err != nil {
+			return nil, nil, 0, err
+		}
+		uuidToID[uuid] = nextID
+		idToUUID[nextID] = uuid
+		nextID++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+
+	// Load cached edges.
+	edgeRows, err := d.sql.QueryContext(ctx,
+		`SELECT source_uuid, target_uuid FROM mutual_knn_edges WHERE group_id = ?`, groupID)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer edgeRows.Close() //nolint:errcheck
+
+	g := &adjGraph{neighbors: make(map[int64][]int64, nextID)}
+	edgeCount := 0
+	for edgeRows.Next() {
+		var src, tgt string
+		if err := edgeRows.Scan(&src, &tgt); err != nil {
+			return nil, nil, 0, err
+		}
+		srcID, ok1 := uuidToID[src]
+		tgtID, ok2 := uuidToID[tgt]
+		if !ok1 || !ok2 {
+			continue
+		}
+		g.neighbors[srcID] = append(g.neighbors[srcID], tgtID)
+		g.neighbors[tgtID] = append(g.neighbors[tgtID], srcID)
+		edgeCount++
+	}
+	if err := edgeRows.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+
+	if edgeCount == 0 {
+		return nil, nil, 0, fmt.Errorf("no cached edges")
+	}
+
+	g.sortNeighbors()
+	return g, idToUUID, nextID, nil
+}
+
+func (d *DB) storeMutualKNNCache(ctx context.Context, groupID string, g *adjGraph, idToUUID map[int64]string, n int64) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mutual_knn_edges WHERE group_id = ?`, groupID); err != nil {
+		return err
+	}
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO mutual_knn_edges (source_id, target_id, source_uuid, target_uuid, group_id) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close() //nolint:errcheck
+
+	seen := map[edgePair]bool{}
+	for id, nbs := range g.neighbors {
+		for _, nb := range nbs {
+			lo, hi := id, nb
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			ep := edgePair{lo, hi}
+			if seen[ep] {
+				continue
+			}
+			seen[ep] = true
+			if _, err := stmt.ExecContext(ctx, lo, hi, idToUUID[lo], idToUUID[hi], groupID); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) computeMutualKNN(ctx context.Context, groupID string, k int) (*adjGraph, map[int64]string, int64, error) {
 	if k <= 0 {
 		k = 20
 	}
@@ -75,22 +201,8 @@ func (d *DB) MutualKNNGraph(ctx context.Context, groupID string, k int) (*adjGra
 		}
 	}
 
-	// 3. HNSW approximate kNN (coder/hnsw, pure Go).
-	// Build index, then search each point for k neighbors.
-	hnswGraph := hnsw.NewGraph[int]()
-	hnswGraph.M = 24
-	hnswGraph.EfSearch = k * 4 // oversample for mutual filter accuracy
-
-	// Add all entities to HNSW index.
-	nodes := make([]hnsw.Node[int], n)
-	for i := 0; i < n; i++ {
-		nodes[i] = hnsw.MakeNode(i, embeddings[i])
-	}
-	hnswGraph.Add(nodes...)
-
-	slog.Info("mutual-knn: HNSW index built", "elapsed", time.Since(start).Round(time.Millisecond))
-
-	// Search k neighbors for each entity (parallel).
+	// 3. Parallel brute-force kNN (exact cosine on normalized vectors).
+	// Cached after first run via mutual_knn_edges table.
 	type knnResult struct {
 		neighbors []int
 	}
@@ -113,25 +225,47 @@ func (d *DB) MutualKNNGraph(ctx context.Context, groupID string, k int) (*adjGra
 		wg.Add(1)
 		go func(lo, hi int) {
 			defer wg.Done()
+			type scored struct {
+				idx int
+				sim float32
+			}
+			topk := make([]scored, 0, k+1)
+
 			for i := lo; i < hi; i++ {
-				found := hnswGraph.Search(embeddings[i], k+1) // +1 for self
-				nbs := make([]int, 0, k)
-				for _, nd := range found {
-					if nd.Key != i { // exclude self
-						nbs = append(nbs, nd.Key)
+				topk = topk[:0]
+				ei := embeddings[i]
+				for j := 0; j < n; j++ {
+					if j == i {
+						continue
 					}
+					sim := dot(ei, embeddings[j])
+					if len(topk) < k {
+						topk = append(topk, scored{j, sim})
+						if len(topk) == k {
+							sort.Slice(topk, func(a, b int) bool { return topk[a].sim > topk[b].sim })
+						}
+					} else if sim > topk[k-1].sim {
+						topk[k-1] = scored{j, sim}
+						for p := k - 1; p > 0 && topk[p].sim > topk[p-1].sim; p-- {
+							topk[p], topk[p-1] = topk[p-1], topk[p]
+						}
+					}
+				}
+				nbs := make([]int, len(topk))
+				for idx, s := range topk {
+					nbs[idx] = s.idx
 				}
 				results[i] = knnResult{neighbors: nbs}
 
 				if i%10000 == 0 && i > 0 {
-					slog.Info("mutual-knn: search progress", "done", i, "total", n)
+					slog.Info("mutual-knn: knn progress", "done", i, "total", n)
 				}
 			}
 		}(lo, hi)
 	}
 	wg.Wait()
 
-	slog.Info("mutual-knn: kNN search complete", "elapsed", time.Since(start).Round(time.Millisecond))
+	slog.Info("mutual-knn: kNN complete", "elapsed", time.Since(start).Round(time.Millisecond))
 
 	// 4. Mutual filter: edge (i,j) only if both i∈kNN(j) AND j∈kNN(i).
 	neighborSets := make([]map[int]bool, n)

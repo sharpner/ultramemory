@@ -133,6 +133,15 @@ CREATE TABLE IF NOT EXISTS edge_curvatures (
 	PRIMARY KEY (source_uuid, target_uuid, group_id)
 );
 CREATE INDEX IF NOT EXISTS idx_edge_curvatures_group ON edge_curvatures(group_id, curvature);
+CREATE TABLE IF NOT EXISTS mutual_knn_edges (
+	source_id INTEGER NOT NULL,
+	target_id INTEGER NOT NULL,
+	source_uuid TEXT NOT NULL,
+	target_uuid TEXT NOT NULL,
+	group_id   TEXT NOT NULL,
+	PRIMARY KEY (source_uuid, target_uuid, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mknn_group ON mutual_knn_edges(group_id);
 `
 
 // DB wraps a SQLite database connection.
