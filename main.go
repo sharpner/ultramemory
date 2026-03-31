@@ -615,8 +615,8 @@ func usage() {
   search  <query>  hybrid search over the graph (flags: -format text|json, -max-tokens N)
   retry            requeue all failed jobs for reprocessing
   resolve          merge near-duplicate entities (flags: -dry-run, -threshold 0.85)
-  communities      detect + list communities (Louvain)          (flags: -format, -resolution)
-  curvature        compute Ollivier-Ricci edge curvatures       (flags: -alpha, -store, -bridges N)
+  communities      detect + list communities                     (flags: -format, -ricci, -resolution)
+  curvature        compute Ollivier-Ricci edge curvatures       (flags: -store, -bridges N, -format)
   bench   <json>   evaluate against LoCoMo benchmark (flags: -limit N, -baseline)
   status           show queue and graph statistics
 
