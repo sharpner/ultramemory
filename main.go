@@ -278,7 +278,9 @@ func main() {
 				fmt.Fprintf(os.Stderr, "warning: community report generation failed: %v\n", err)
 			}
 		}
-		printCommunities(ctx, db, groupID, *format, *minMembers)
+		if !*detect {
+			printCommunities(ctx, db, groupID, *format, *minMembers)
+		}
 
 	case "curvature":
 		fs := flag.NewFlagSet("curvature", flag.ExitOnError)
