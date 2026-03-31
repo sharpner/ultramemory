@@ -93,32 +93,42 @@ func (d *DB) UpdateMutualKNN(ctx context.Context, newUUID, groupID string, newEm
 	}
 
 	// 4. Mutual check: for each candidate, is newUUID also in their top-k?
+	// Compute candidate's actual top-k similarities to find the k-th threshold.
 	var mutualEdges [][2]string
 	for _, candIdx := range newNeighborIdxs {
-		candEmb := normalizeVec(existing[candIdx].emb)
-		simToNew := dotF32(candEmb, newNorm)
+		candNorm := normalizeVec(existing[candIdx].emb)
+		simToNew := dotF32(candNorm, newNorm)
 
-		// Find candidate's k-th nearest neighbor similarity (threshold).
-		// If simToNew > candidate's k-th neighbor sim → newUUID is in candidate's top-k.
-		kthSim := float32(-1)
-		count := 0
+		// Build candidate's top-k (same algorithm as step 3).
+		candTopK := make([]scored, 0, k)
 		for j, e := range existing {
 			if j == candIdx {
 				continue
 			}
-			sim := dotF32(candEmb, normalizeVec(e.emb))
-			count++
-			if count <= k {
-				if sim < kthSim || kthSim < 0 {
-					kthSim = sim
+			sim := dotF32(candNorm, normalizeVec(e.emb))
+			if len(candTopK) < k {
+				candTopK = append(candTopK, scored{j, sim})
+				if len(candTopK) == k {
+					slices.SortFunc(candTopK, func(a, b scored) int {
+						if a.sim > b.sim {
+							return -1
+						}
+						if a.sim < b.sim {
+							return 1
+						}
+						return 0
+					})
+				}
+			} else if sim > candTopK[k-1].sim {
+				candTopK[k-1] = scored{j, sim}
+				for p := k - 1; p > 0 && candTopK[p].sim > candTopK[p-1].sim; p-- {
+					candTopK[p], candTopK[p-1] = candTopK[p-1], candTopK[p]
 				}
 			}
-			// We need exact k-th, not just any threshold.
-			// Simplified: track the k-th smallest in top-k.
 		}
-		// Simplified mutual check: if simToNew is higher than at least one of
-		// candidate's current top-k, it's mutual.
-		if simToNew > kthSim || count < k {
+
+		// newUUID is in candidate's top-k if its similarity beats the k-th entry.
+		if len(candTopK) < k || simToNew > candTopK[k-1].sim {
 			mutualEdges = append(mutualEdges, [2]string{newUUID, existing[candIdx].uuid})
 		}
 	}

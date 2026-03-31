@@ -194,16 +194,6 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 		}
 	}
 
-	// Signal 5 (curvature bridge boost) removed.
-	// LoCoMo showed -3% temporal regression from bridge boosting.
-	// Mutual-kNN communities provide the geometric signal via Signal 4 (community affinity) instead.
-	// Curvature data remains in edge_curvatures for status/analysis.
-	//
-	// Original design: edges with κ < -0.3 got up to +0.10 RRF boost.
-	// Problem: temporal queries need recent facts, not cross-domain bridges.
-	if false {
-	}
-
 	type rfentry struct {
 		key   string
 		score float64

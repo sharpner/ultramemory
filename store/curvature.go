@@ -7,6 +7,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -289,7 +290,11 @@ func (d *DB) EdgeCurvatureMap(ctx context.Context, groupID string) (map[[2]strin
 	rows, err := d.sql.QueryContext(ctx,
 		`SELECT source_uuid, target_uuid, curvature FROM edge_curvatures WHERE group_id = ?`, groupID)
 	if err != nil {
-		return nil, nil // table might not exist yet
+		// Table might not exist on legacy DBs — not an error.
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query curvatures: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
 

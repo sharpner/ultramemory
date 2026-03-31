@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math"
 	"runtime"
-	"slices"
 	"sync"
 	"time"
 
@@ -238,7 +237,7 @@ func (d *DB) computeMutualKNN(ctx context.Context, groupID string, k int) (*adjG
 					if j == i {
 						continue
 					}
-					sim := dot(ei, embeddings[j])
+					sim := dotF32(ei, embeddings[j])
 					if len(topk) < k {
 						topk = append(topk, scored{j, sim})
 						if len(topk) == k {
@@ -313,14 +312,6 @@ func (d *DB) computeMutualKNN(ctx context.Context, groupID string, k int) (*adjG
 	return g, idToUUID, int64(n), nil
 }
 
-// dot computes the inner product of two float32 vectors.
-func dot(a, b []float32) float32 {
-	s := float32(0)
-	for i := range a {
-		s += a[i] * b[i]
-	}
-	return s
-}
 
 // MutualKNNCommunities builds a mutual-kNN graph from entity embeddings,
 // computes ORC on it, then runs Louvain with curvature weights.
@@ -474,10 +465,4 @@ func (d *DB) MutualKNNCommunities(ctx context.Context, groupID string, k int, re
 		Communities: len(communities),
 		Entities:    int(nodeCount),
 	}, nil
-}
-
-// Helper to sort slices (used by adjGraph.sortNeighbors, already defined in curvature.go).
-func init() {
-	// slices.Sort is available — no init needed.
-	_ = slices.Sort[[]int64]
 }
