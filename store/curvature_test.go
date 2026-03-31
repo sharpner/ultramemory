@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"fmt"
 	"math"
 	"testing"
 )
@@ -142,6 +144,67 @@ func TestTransportCost_Dirac(t *testing.T) {
 	w := transportCost(C, 1, 1)
 	if !approxEq(w, 1.0, 0.01) {
 		t.Errorf("dirac: want W₁≈1, got %f", w)
+	}
+}
+
+func TestRicciFlowCommunities_TwoTriangles(t *testing.T) {
+	// Two triangles (0-1-2, 3-4-5) connected by bridge 2-3.
+	// Removing the bridge (most negative κ) should yield 2 communities.
+	db := openTestDB(t)
+	ctx := context.Background()
+	group := "test-ricci"
+
+	// Insert entities.
+	for i := 0; i < 6; i++ {
+		uuid := fmt.Sprintf("node-%d", i)
+		_, err := db.SQL().ExecContext(ctx,
+			`INSERT INTO entities (uuid, name, entity_type, group_id) VALUES (?, ?, 'Concept', ?)`,
+			uuid, fmt.Sprintf("Node%d", i), group)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Insert edges (two triangles + bridge).
+	edgePairs := [][2]int{{0, 1}, {1, 2}, {0, 2}, {3, 4}, {4, 5}, {3, 5}, {2, 3}}
+	for i, e := range edgePairs {
+		_, err := db.SQL().ExecContext(ctx,
+			`INSERT INTO edges (uuid, source_uuid, target_uuid, name, fact, group_id) VALUES (?, ?, ?, 'CONNECTS', 'test', ?)`,
+			fmt.Sprintf("edge-%d", i), fmt.Sprintf("node-%d", e[0]), fmt.Sprintf("node-%d", e[1]), group)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Run Ricci Flow with 15% removal (1/7 edges ≈ the bridge).
+	cr, err := db.RicciFlowCommunities(ctx, group, 0.15)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("communities: %d, entities: %d", cr.Communities, cr.Entities)
+
+	// Should find at least 2 communities (the two triangles).
+	if cr.Communities < 2 {
+		t.Errorf("expected ≥2 communities, got %d", cr.Communities)
+	}
+
+	// Verify nodes 0,1,2 are in same community and 3,4,5 in another.
+	cids := map[string]int{}
+	for i := 0; i < 6; i++ {
+		cid := db.EntityCommunityID(ctx, fmt.Sprintf("node-%d", i))
+		cids[fmt.Sprintf("node-%d", i)] = cid
+		t.Logf("  node-%d → community %d", i, cid)
+	}
+
+	if cids["node-0"] != cids["node-1"] || cids["node-1"] != cids["node-2"] {
+		t.Error("nodes 0,1,2 should be in the same community")
+	}
+	if cids["node-3"] != cids["node-4"] || cids["node-4"] != cids["node-5"] {
+		t.Error("nodes 3,4,5 should be in the same community")
+	}
+	if cids["node-0"] == cids["node-3"] {
+		t.Error("nodes 0 and 3 should be in different communities")
 	}
 }
 

@@ -256,14 +256,24 @@ func main() {
 		fs := flag.NewFlagSet("communities", flag.ExitOnError)
 		format := fs.String("format", "text", "output format: text|json")
 		minMembers := fs.Int("min", 2, "minimum members to show a community")
-		detect := fs.Bool("detect", false, "run Louvain detection (writes to DB — don't use while worker is running)")
+		detect := fs.Bool("detect", false, "run community detection (writes to DB)")
+		ricci := fs.Bool("ricci", false, "use Ricci Flow instead of Louvain")
+		removePct := fs.Float64("remove-pct", 0.01, "Ricci Flow: fraction of edges to remove (0.01 = 1%)")
 		resolution := fs.Float64("resolution", 1.0, "Louvain resolution (higher = more, smaller communities)")
 		_ = fs.Parse(os.Args[2:])
 		if *detect {
-			fmt.Fprintln(os.Stderr, "Running Louvain community detection…")
-			cr, err := db.DetectCommunities(ctx, groupID, *resolution)
-			must(err, "detect communities")
-			fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities\n", cr.Communities, cr.Entities)
+			if *ricci {
+				fmt.Fprintln(os.Stderr, "Running Ricci Flow community detection…")
+				cr, err := db.RicciFlowCommunities(ctx, groupID, *removePct)
+				must(err, "ricci flow communities")
+				fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities (Ricci Flow, %.0f%% edges removed)\n",
+					cr.Communities, cr.Entities, *removePct*100)
+			} else {
+				fmt.Fprintln(os.Stderr, "Running Louvain community detection…")
+				cr, err := db.DetectCommunities(ctx, groupID, *resolution)
+				must(err, "detect communities")
+				fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities\n", cr.Communities, cr.Entities)
+			}
 			if err := graph.GenerateCommunityReports(ctx, db, nil, groupID); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: community report generation failed: %v\n", err)
 			}

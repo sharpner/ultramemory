@@ -303,6 +303,154 @@ func (d *DB) EdgeCurvatureMap(ctx context.Context, groupID string) (map[[2]strin
 	return m, rows.Err()
 }
 
+// RicciFlowCommunities detects communities by iteratively removing the most
+// negatively curved edges (bridges) and finding connected components.
+// removePct is the fraction of edges to remove (0.01 = 1%, best in experiments).
+//
+// This is a discrete analogue of Ricci flow: negatively curved regions "expand"
+// (edges break), positively curved regions "contract" (clusters tighten).
+//
+// Experiment 079 showed Ricci Flow achieves 33% higher modularity than Louvain
+// on the research graph (0.97 vs 0.73).
+func (d *DB) RicciFlowCommunities(ctx context.Context, groupID string, removePct float64) (CommunityResult, error) {
+	if removePct <= 0 || removePct >= 1 {
+		removePct = 0.01
+	}
+
+	// 1. Compute curvatures (or load existing).
+	curvatures, _, err := d.ComputeCurvatures(ctx, groupID, 0)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("compute curvatures: %w", err)
+	}
+	if len(curvatures) == 0 {
+		return CommunityResult{}, nil
+	}
+
+	// Store curvatures for search signal.
+	if err := d.StoreCurvatures(ctx, groupID, curvatures); err != nil {
+		return CommunityResult{}, fmt.Errorf("store curvatures: %w", err)
+	}
+
+	// 2. Sort by curvature ascending (most negative first).
+	slices.SortFunc(curvatures, func(a, b EdgeCurvature) int {
+		if a.Curvature < b.Curvature {
+			return -1
+		}
+		if a.Curvature > b.Curvature {
+			return 1
+		}
+		return 0
+	})
+
+	// 3. Remove bottom removePct% of edges.
+	nRemove := int(float64(len(curvatures)) * removePct)
+	removed := make(map[[2]string]bool, nRemove)
+	for i := 0; i < nRemove && i < len(curvatures); i++ {
+		e := curvatures[i]
+		removed[[2]string{e.SourceUUID, e.TargetUUID}] = true
+		removed[[2]string{e.TargetUUID, e.SourceUUID}] = true
+	}
+
+	// 4. Build adjacency from remaining edges.
+	adj := map[string][]string{}
+	allNodes := map[string]bool{}
+	for _, e := range curvatures {
+		if removed[[2]string{e.SourceUUID, e.TargetUUID}] {
+			continue
+		}
+		adj[e.SourceUUID] = append(adj[e.SourceUUID], e.TargetUUID)
+		adj[e.TargetUUID] = append(adj[e.TargetUUID], e.SourceUUID)
+		allNodes[e.SourceUUID] = true
+		allNodes[e.TargetUUID] = true
+	}
+
+	// Also include isolated nodes (from removed edges).
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT uuid FROM entities WHERE group_id = ?`, groupID)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("load entities: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var entityCount int
+	for rows.Next() {
+		var uuid string
+		if err := rows.Scan(&uuid); err != nil {
+			return CommunityResult{}, err
+		}
+		allNodes[uuid] = true
+		entityCount++
+	}
+	if err := rows.Err(); err != nil {
+		return CommunityResult{}, err
+	}
+
+	// 5. BFS connected components.
+	visited := make(map[string]bool, len(allNodes))
+	var communities [][]string
+
+	for node := range allNodes {
+		if visited[node] {
+			continue
+		}
+		var component []string
+		queue := []string{node}
+		for len(queue) > 0 {
+			n := queue[0]
+			queue = queue[1:]
+			if visited[n] {
+				continue
+			}
+			visited[n] = true
+			component = append(component, n)
+			for _, nb := range adj[n] {
+				if !visited[nb] {
+					queue = append(queue, nb)
+				}
+			}
+		}
+		communities = append(communities, component)
+	}
+
+	// 6. Write community_id to database.
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE entities SET community_id = ? WHERE uuid = ? AND group_id = ?`)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close() //nolint:errcheck
+
+	for cid, members := range communities {
+		for _, uuid := range members {
+			if _, err := stmt.ExecContext(ctx, cid, uuid, groupID); err != nil {
+				return CommunityResult{}, fmt.Errorf("update community: %w", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return CommunityResult{}, fmt.Errorf("commit: %w", err)
+	}
+
+	slog.Info("ricci flow community detection complete",
+		"group", groupID,
+		"entities", entityCount,
+		"communities", len(communities),
+		"edges_removed", nRemove,
+		"remove_pct", removePct,
+	)
+
+	return CommunityResult{
+		Communities: len(communities),
+		Entities:    entityCount,
+	}, nil
+}
+
 // --- Ollivier-Ricci Curvature ---
 //
 // κ(u,v) = 1 - W₁(μ_u, μ_v)
