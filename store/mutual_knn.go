@@ -7,10 +7,10 @@ import (
 	"math"
 	"runtime"
 	"slices"
-	"sort"
 	"sync"
 	"time"
 
+	"github.com/coder/hnsw"
 	"gonum.org/v1/gonum/graph/community"
 	"gonum.org/v1/gonum/graph/simple"
 )
@@ -75,10 +75,24 @@ func (d *DB) MutualKNNGraph(ctx context.Context, groupID string, k int) (*adjGra
 		}
 	}
 
-	// 3. Parallel kNN via brute-force cosine (inner product on normalized vectors).
-	// Each goroutine processes a chunk of entities.
+	// 3. HNSW approximate kNN (coder/hnsw, pure Go).
+	// Build index, then search each point for k neighbors.
+	hnswGraph := hnsw.NewGraph[int]()
+	hnswGraph.M = 24
+	hnswGraph.EfSearch = k * 4 // oversample for mutual filter accuracy
+
+	// Add all entities to HNSW index.
+	nodes := make([]hnsw.Node[int], n)
+	for i := 0; i < n; i++ {
+		nodes[i] = hnsw.MakeNode(i, embeddings[i])
+	}
+	hnswGraph.Add(nodes...)
+
+	slog.Info("mutual-knn: HNSW index built", "elapsed", time.Since(start).Round(time.Millisecond))
+
+	// Search k neighbors for each entity (parallel).
 	type knnResult struct {
-		neighbors []int // top-k neighbor indices (excluding self)
+		neighbors []int
 	}
 
 	results := make([]knnResult, n)
@@ -91,57 +105,33 @@ func (d *DB) MutualKNNGraph(ctx context.Context, groupID string, k int) (*adjGra
 	var wg sync.WaitGroup
 
 	for w := 0; w < workers; w++ {
-		start := w * chunkSize
-		end := start + chunkSize
-		if end > n {
-			end = n
+		lo := w * chunkSize
+		hi := lo + chunkSize
+		if hi > n {
+			hi = n
 		}
 		wg.Add(1)
 		go func(lo, hi int) {
 			defer wg.Done()
-			// Per-goroutine scratch buffer for similarities.
-			type scored struct {
-				idx int
-				sim float32
-			}
-			topk := make([]scored, 0, k+1)
-
 			for i := lo; i < hi; i++ {
-				topk = topk[:0]
-				ei := embeddings[i]
-				for j := 0; j < n; j++ {
-					if j == i {
-						continue
+				found := hnswGraph.Search(embeddings[i], k+1) // +1 for self
+				nbs := make([]int, 0, k)
+				for _, nd := range found {
+					if nd.Key != i { // exclude self
+						nbs = append(nbs, nd.Key)
 					}
-					sim := dot(ei, embeddings[j])
-					if len(topk) < k {
-						topk = append(topk, scored{j, sim})
-						if len(topk) == k {
-							sort.Slice(topk, func(a, b int) bool { return topk[a].sim > topk[b].sim })
-						}
-					} else if sim > topk[k-1].sim {
-						topk[k-1] = scored{j, sim}
-						// Bubble up.
-						for p := k - 1; p > 0 && topk[p].sim > topk[p-1].sim; p-- {
-							topk[p], topk[p-1] = topk[p-1], topk[p]
-						}
-					}
-				}
-				nbs := make([]int, len(topk))
-				for idx, s := range topk {
-					nbs[idx] = s.idx
 				}
 				results[i] = knnResult{neighbors: nbs}
 
 				if i%10000 == 0 && i > 0 {
-					slog.Info("mutual-knn: knn progress", "done", i, "total", n)
+					slog.Info("mutual-knn: search progress", "done", i, "total", n)
 				}
 			}
-		}(start, end)
+		}(lo, hi)
 	}
 	wg.Wait()
 
-	slog.Info("mutual-knn: kNN complete", "elapsed", time.Since(start).Round(time.Millisecond))
+	slog.Info("mutual-knn: kNN search complete", "elapsed", time.Since(start).Round(time.Millisecond))
 
 	// 4. Mutual filter: edge (i,j) only if both i∈kNN(j) AND j∈kNN(i).
 	neighborSets := make([]map[int]bool, n)
