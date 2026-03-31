@@ -303,97 +303,168 @@ func (d *DB) EdgeCurvatureMap(ctx context.Context, groupID string) (map[[2]strin
 	return m, rows.Err()
 }
 
-// RicciFlowCommunities detects communities by iteratively removing the most
-// negatively curved edges (bridges) and finding connected components.
-// removePct is the fraction of edges to remove (0.01 = 1%, best in experiments).
+// RicciFlowCommunities detects communities via iterative Ricci flow:
+// each iteration recomputes ORC on the current graph, removes the most
+// negatively curved edges, and repeats until the giant component breaks.
 //
-// This is a discrete analogue of Ricci flow: negatively curved regions "expand"
-// (edges break), positively curved regions "contract" (clusters tighten).
-//
-// Experiment 079 showed Ricci Flow achieves 33% higher modularity than Louvain
-// on the research graph (0.97 vs 0.73).
+// removePct controls how many edges to remove per iteration (fraction of remaining).
+// maxIter caps the number of iterations.
 func (d *DB) RicciFlowCommunities(ctx context.Context, groupID string, removePct float64) (CommunityResult, error) {
 	if removePct <= 0 || removePct >= 1 {
-		removePct = 0.01
+		removePct = 0.05
 	}
+	const maxIter = 20
 
-	// 1. Compute curvatures (or load existing).
-	curvatures, _, err := d.ComputeCurvatures(ctx, groupID, 0)
-	if err != nil {
-		return CommunityResult{}, fmt.Errorf("compute curvatures: %w", err)
-	}
-	if len(curvatures) == 0 {
-		return CommunityResult{}, nil
-	}
-
-	// Store curvatures for search signal.
-	if err := d.StoreCurvatures(ctx, groupID, curvatures); err != nil {
-		return CommunityResult{}, fmt.Errorf("store curvatures: %w", err)
-	}
-
-	// 2. Sort by curvature ascending (most negative first).
-	slices.SortFunc(curvatures, func(a, b EdgeCurvature) int {
-		if a.Curvature < b.Curvature {
-			return -1
-		}
-		if a.Curvature > b.Curvature {
-			return 1
-		}
-		return 0
-	})
-
-	// 3. Remove bottom removePct% of edges.
-	nRemove := int(float64(len(curvatures)) * removePct)
-	removed := make(map[[2]string]bool, nRemove)
-	for i := 0; i < nRemove && i < len(curvatures); i++ {
-		e := curvatures[i]
-		removed[[2]string{e.SourceUUID, e.TargetUUID}] = true
-		removed[[2]string{e.TargetUUID, e.SourceUUID}] = true
-	}
-
-	// 4. Build adjacency from remaining edges.
-	adj := map[string][]string{}
-	allNodes := map[string]bool{}
-	for _, e := range curvatures {
-		if removed[[2]string{e.SourceUUID, e.TargetUUID}] {
-			continue
-		}
-		adj[e.SourceUUID] = append(adj[e.SourceUUID], e.TargetUUID)
-		adj[e.TargetUUID] = append(adj[e.TargetUUID], e.SourceUUID)
-		allNodes[e.SourceUUID] = true
-		allNodes[e.TargetUUID] = true
-	}
-
-	// Also include isolated nodes (from removed edges).
+	// 1. Load graph from DB.
 	rows, err := d.sql.QueryContext(ctx,
 		`SELECT uuid FROM entities WHERE group_id = ?`, groupID)
 	if err != nil {
 		return CommunityResult{}, fmt.Errorf("load entities: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
-	var entityCount int
+
+	uuidToID := map[string]int64{}
+	idToUUID := map[int64]string{}
+	var nextID int64
 	for rows.Next() {
 		var uuid string
 		if err := rows.Scan(&uuid); err != nil {
 			return CommunityResult{}, err
 		}
-		allNodes[uuid] = true
-		entityCount++
+		uuidToID[uuid] = nextID
+		idToUUID[nextID] = uuid
+		nextID++
 	}
 	if err := rows.Err(); err != nil {
 		return CommunityResult{}, err
 	}
 
-	// 5. BFS connected components.
-	visited := make(map[string]bool, len(allNodes))
-	var communities [][]string
+	g := &adjGraph{neighbors: make(map[int64][]int64, nextID)}
+	edgeSet := map[edgePair]bool{}
 
-	for node := range allNodes {
-		if visited[node] {
+	edgeRows, err := d.sql.QueryContext(ctx,
+		`SELECT source_uuid, target_uuid FROM edges WHERE group_id = ?`, groupID)
+	if err != nil {
+		return CommunityResult{}, fmt.Errorf("load edges: %w", err)
+	}
+	defer edgeRows.Close() //nolint:errcheck
+
+	for edgeRows.Next() {
+		var src, tgt string
+		if err := edgeRows.Scan(&src, &tgt); err != nil {
+			return CommunityResult{}, err
+		}
+		srcID, ok1 := uuidToID[src]
+		tgtID, ok2 := uuidToID[tgt]
+		if !ok1 || !ok2 || srcID == tgtID {
 			continue
 		}
-		var component []string
-		queue := []string{node}
+		lo, hi := srcID, tgtID
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		ep := edgePair{lo, hi}
+		if edgeSet[ep] {
+			continue
+		}
+		edgeSet[ep] = true
+		g.neighbors[lo] = append(g.neighbors[lo], hi)
+		g.neighbors[hi] = append(g.neighbors[hi], lo)
+	}
+	if err := edgeRows.Err(); err != nil {
+		return CommunityResult{}, err
+	}
+	g.sortNeighbors()
+
+	totalEdges := len(edgeSet)
+	totalRemoved := 0
+
+	slog.Info("ricci flow: loaded graph", "nodes", nextID, "edges", totalEdges)
+
+	// 2. Iterative flow: compute ORC → remove bottom edges → repeat.
+	for iter := 0; iter < maxIter; iter++ {
+		// Collect current edges.
+		var currentEdges []edgePair
+		for ep := range edgeSet {
+			currentEdges = append(currentEdges, ep)
+		}
+		if len(currentEdges) == 0 {
+			break
+		}
+
+		// Compute ORC on current graph.
+		type scoredEdge struct {
+			ep edgePair
+			k  float64
+		}
+		scored := make([]scoredEdge, len(currentEdges))
+		for i, ep := range currentEdges {
+			scored[i] = scoredEdge{ep, ollivierRicci(g, ep.lo, ep.hi)}
+		}
+		slices.SortFunc(scored, func(a, b scoredEdge) int {
+			if a.k < b.k {
+				return -1
+			}
+			if a.k > b.k {
+				return 1
+			}
+			return 0
+		})
+
+		// Stop if no more negative-curvature edges (nothing useful to cut).
+		if scored[0].k >= 0 {
+			slog.Info("ricci flow: no negative edges left, stopping", "iter", iter+1)
+			break
+		}
+
+		// Remove bottom removePct% of remaining edges (only negative ones).
+		nRemove := int(float64(len(scored)) * removePct)
+		if nRemove < 1 {
+			nRemove = 1
+		}
+
+		for i := 0; i < nRemove && i < len(scored); i++ {
+			if scored[i].k >= 0 {
+				break // don't remove positive-curvature edges
+			}
+			ep := scored[i].ep
+			delete(edgeSet, ep)
+			// Remove from adjacency.
+			g.neighbors[ep.lo] = removeFromSorted(g.neighbors[ep.lo], ep.hi)
+			g.neighbors[ep.hi] = removeFromSorted(g.neighbors[ep.hi], ep.lo)
+			totalRemoved++
+		}
+
+		// Check giant component.
+		giant := largestComponent(g, nextID)
+		giantPct := float64(giant) / float64(nextID) * 100
+
+		slog.Info("ricci flow: iteration",
+			"iter", iter+1,
+			"edges_remaining", len(edgeSet),
+			"removed_this_iter", nRemove,
+			"total_removed", totalRemoved,
+			"giant_component", giant,
+			"giant_pct", fmt.Sprintf("%.1f%%", giantPct),
+		)
+
+		// Stop when giant component is < 50% of nodes.
+		if giantPct < 50 {
+			slog.Info("ricci flow: giant component broken", "iter", iter+1)
+			break
+		}
+	}
+
+	// 3. Final connected components → communities.
+	visited := make(map[int64]bool, nextID)
+	var communities [][]int64
+
+	for id := int64(0); id < nextID; id++ {
+		if visited[id] {
+			continue
+		}
+		var component []int64
+		queue := []int64{id}
 		for len(queue) > 0 {
 			n := queue[0]
 			queue = queue[1:]
@@ -402,7 +473,7 @@ func (d *DB) RicciFlowCommunities(ctx context.Context, groupID string, removePct
 			}
 			visited[n] = true
 			component = append(component, n)
-			for _, nb := range adj[n] {
+			for _, nb := range g.neighbors[n] {
 				if !visited[nb] {
 					queue = append(queue, nb)
 				}
@@ -411,7 +482,21 @@ func (d *DB) RicciFlowCommunities(ctx context.Context, groupID string, removePct
 		communities = append(communities, component)
 	}
 
-	// 6. Write community_id to database.
+	// 4. Store final curvatures for search signal.
+	var finalCurvatures []EdgeCurvature
+	for ep := range edgeSet {
+		k := ollivierRicci(g, ep.lo, ep.hi)
+		finalCurvatures = append(finalCurvatures, EdgeCurvature{
+			SourceUUID: idToUUID[ep.lo],
+			TargetUUID: idToUUID[ep.hi],
+			Curvature:  k,
+		})
+	}
+	if err := d.StoreCurvatures(ctx, groupID, finalCurvatures); err != nil {
+		slog.Warn("store final curvatures failed", "err", err)
+	}
+
+	// 5. Write community_id to database.
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return CommunityResult{}, fmt.Errorf("begin tx: %w", err)
@@ -426,8 +511,8 @@ func (d *DB) RicciFlowCommunities(ctx context.Context, groupID string, removePct
 	defer stmt.Close() //nolint:errcheck
 
 	for cid, members := range communities {
-		for _, uuid := range members {
-			if _, err := stmt.ExecContext(ctx, cid, uuid, groupID); err != nil {
+		for _, id := range members {
+			if _, err := stmt.ExecContext(ctx, cid, idToUUID[id], groupID); err != nil {
 				return CommunityResult{}, fmt.Errorf("update community: %w", err)
 			}
 		}
@@ -439,16 +524,56 @@ func (d *DB) RicciFlowCommunities(ctx context.Context, groupID string, removePct
 
 	slog.Info("ricci flow community detection complete",
 		"group", groupID,
-		"entities", entityCount,
+		"entities", nextID,
 		"communities", len(communities),
-		"edges_removed", nRemove,
-		"remove_pct", removePct,
+		"total_edges_removed", totalRemoved,
+		"edges_remaining", len(edgeSet),
 	)
 
 	return CommunityResult{
 		Communities: len(communities),
-		Entities:    entityCount,
+		Entities:    int(nextID),
 	}, nil
+}
+
+// removeFromSorted removes val from a sorted slice in O(log n + n).
+func removeFromSorted(s []int64, val int64) []int64 {
+	i, found := slices.BinarySearch(s, val)
+	if !found {
+		return s
+	}
+	return slices.Delete(s, i, i+1)
+}
+
+// largestComponent returns the size of the largest connected component.
+func largestComponent(g *adjGraph, nodeCount int64) int {
+	visited := make([]bool, nodeCount)
+	largest := 0
+	for id := int64(0); id < nodeCount; id++ {
+		if visited[id] {
+			continue
+		}
+		size := 0
+		queue := []int64{id}
+		for len(queue) > 0 {
+			n := queue[0]
+			queue = queue[1:]
+			if visited[n] {
+				continue
+			}
+			visited[n] = true
+			size++
+			for _, nb := range g.neighbors[n] {
+				if !visited[nb] {
+					queue = append(queue, nb)
+				}
+			}
+		}
+		if size > largest {
+			largest = size
+		}
+	}
+	return largest
 }
 
 // --- Ollivier-Ricci Curvature ---
