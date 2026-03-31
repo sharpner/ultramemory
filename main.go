@@ -263,10 +263,10 @@ func main() {
 		_ = fs.Parse(os.Args[2:])
 		if *detect {
 			if *ricci {
-				fmt.Fprintln(os.Stderr, "Running Curvature-Weighted Louvain…")
-				cr, err := db.CurvatureWeightedLouvain(ctx, groupID, *resolution)
-				must(err, "curvature-weighted louvain")
-				fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities (Curvature-Weighted Louvain)\n",
+				fmt.Fprintln(os.Stderr, "Running Mutual-kNN + ORC + Louvain…")
+				cr, err := db.MutualKNNCommunities(ctx, groupID, 20, *resolution)
+				must(err, "mutual-knn communities")
+				fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities (Mutual-kNN + ORC)\n",
 					cr.Communities, cr.Entities)
 			} else {
 				fmt.Fprintln(os.Stderr, "Running Louvain community detection…")
