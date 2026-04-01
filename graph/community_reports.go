@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/sharpner/ultramemory/llm"
 	"github.com/sharpner/ultramemory/store"
 )
 
@@ -18,7 +17,7 @@ import (
 // "LGBTQ+ support group" membership not present in the actual conversation),
 // which degraded open-domain retrieval by -2.8% and overall by -1.7%.
 // Fact-only reports are grounded, verifiable, and prevent context pollution.
-func GenerateCommunityReports(ctx context.Context, db *store.DB, _ *llm.Client, groupID string) error {
+func GenerateCommunityReports(ctx context.Context, db *store.DB, groupID string) error {
 	inputs, err := db.CommunityInputsForGroup(ctx, groupID, 3)
 	if err != nil {
 		return fmt.Errorf("load community inputs: %w", err)

@@ -11,7 +11,7 @@ import (
 
 // noopClient returns a client whose Embed call returns zero embeddings.
 // Sufficient for FTS-only search tests where extraction is never triggered.
-func noopClient(t *testing.T) *llm.Client {
+func noopClient(t *testing.T) llm.Embedder {
 	t.Helper()
 	return newMockClient(t, `{"extracted_entities":[]}`, `{"edges":[]}`)
 }

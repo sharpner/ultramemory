@@ -1,6 +1,6 @@
-// memory-local — portable knowledge graph builder using SQLite + Ollama.
+// memory-local — portable knowledge graph builder using SQLite + pluggable LLM backends.
 //
-// Dependencies: Go, SQLite (embedded), Ollama (local daemon).
+// Dependencies: Go, SQLite (embedded), plus the active build profile runtime.
 //
 // Usage:
 //
@@ -40,12 +40,9 @@ import (
 var version = "(dev)"
 
 const (
-	defaultDB             = "memory-local.db"
-	defaultOllama         = "http://localhost:11434"
-	defaultExtractModel   = "gemma3:4b"
-	defaultEmbeddingModel = "mxbai-embed-large"
-	defaultGroup          = "default"
-	pollInterval          = 200 * time.Millisecond
+	defaultDB    = "memory-local.db"
+	defaultGroup = "default"
+	pollInterval = 200 * time.Millisecond
 )
 
 func main() {
@@ -59,12 +56,10 @@ func main() {
 	}
 
 	// Config from env (overridable).
-	dbPath           := envOr("MEMORY_DB", defaultDB)
-	ollamaURL        := envOr("MEMORY_OLLAMA", defaultOllama)
-	extractModel     := envOr("MEMORY_MODEL", defaultExtractModel)
-	embedModel       := envOr("MEMORY_EMBED_MODEL", defaultEmbeddingModel)
-	groupID          := envOr("MEMORY_GROUP", defaultGroup)
-	extractProvider  := strings.ToLower(strings.TrimSpace(os.Getenv("MEMORY_EXTRACT_PROVIDER")))
+	dbPath := envOr("MEMORY_DB", defaultDB)
+	extractModel := envOr("MEMORY_MODEL", defaultExtractModel)
+	embedModel := envOr("MEMORY_EMBED_MODEL", defaultEmbeddingModel)
+	groupID := envOr("MEMORY_GROUP", defaultGroup)
 	resolveThreshold := 0.92
 	if v := os.Getenv("MEMORY_RESOLVE_THRESHOLD"); v != "" {
 		t, err := strconv.ParseFloat(v, 64)
@@ -73,12 +68,7 @@ func main() {
 		}
 		resolveThreshold = t
 	}
-	// Default llmParallel: 1 for Ollama, 4 for Mistral API (handles concurrency server-side).
-	defaultParallel := 1
-	if extractProvider == "mistral" {
-		defaultParallel = 4
-	}
-	llmParallel := defaultParallel
+	llmParallel := defaultLLMParallel
 	if v := os.Getenv("MEMORY_LLM_PARALLEL"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
@@ -98,23 +88,9 @@ func main() {
 	must(err, "open db")
 	defer db.Close() //nolint:errcheck
 
-	client := llm.New(ollamaURL, extractModel, embedModel)
-
-	// Build the extractor: Ollama (default) or Mistral API.
-	var extractor llm.EntityExtractor
-	switch extractProvider {
-	case "", "ollama":
-		extractor = client
-	case "mistral":
-		mistralKey := os.Getenv("MISTRAL_API_KEY")
-		if mistralKey == "" {
-			fatalf("MISTRAL_API_KEY not set — required when MEMORY_EXTRACT_PROVIDER=mistral")
-		}
-		extractor = llm.NewMistral(mistralKey, extractModel)
-		slog.Info("extraction provider", "provider", "mistral", "model", extractModel)
-	default:
-		fatalf("unknown MEMORY_EXTRACT_PROVIDER %q — use 'ollama' or 'mistral'", extractProvider)
-	}
+	runtimeProfile, err := newDefaultRuntime(extractModel, embedModel)
+	must(err, "configure runtime")
+	slog.Info("runtime configured", "provider", buildProviderName, "extract_model", extractModel, "embed_model", embedModel)
 
 	switch os.Args[1] {
 	case "ingest":
@@ -125,8 +101,8 @@ func main() {
 			fatalf("usage: ultramemory ingest [-source URL] <path>")
 		}
 		rejectTrailingFlags(fs)
-		must(client.Ping(ctx), "ping ollama")
-		w := ingest.New(db, groupID).WithOCR(client)
+		must(runtimeProfile.ping(ctx), "ping runtime")
+		w := ingest.New(db, groupID).WithOCR(runtimeProfile.ocr)
 		if *source != "" {
 			w = w.WithSource(*source)
 		}
@@ -135,14 +111,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks from %s\n", n, fs.Arg(0))
 
 	case "worker":
-		must(client.Ping(ctx), "ping ollama")
-		if extractProvider == "" || extractProvider == "ollama" {
-			fmt.Fprintln(os.Stderr, "Warming up model…")
-			if err := client.Warmup(ctx); err != nil {
-				slog.Warn("warmup failed", "err", err)
-			}
+		must(runtimeProfile.ping(ctx), "ping runtime")
+		fmt.Fprintln(os.Stderr, "Warming up model…")
+		if err := runtimeProfile.warmup(ctx); err != nil {
+			slog.Warn("warmup failed", "err", err)
 		}
-		runWorker(ctx, db, extractor, client, resolveThreshold, llmParallel, groupID)
+		runWorker(ctx, db, runtimeProfile.extractor, runtimeProfile.embedder, resolveThreshold, llmParallel, groupID)
 
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
@@ -152,89 +126,73 @@ func main() {
 			fatalf("usage: ultramemory run [-source URL] <path>")
 		}
 		rejectTrailingFlags(fs)
-		must(client.Ping(ctx), "ping ollama")
-
-		if extractProvider == "" || extractProvider == "ollama" {
-			fmt.Fprintln(os.Stderr, "Warming up model…")
-			if err := client.Warmup(ctx); err != nil {
-				slog.Warn("warmup failed", "err", err)
-			}
+		must(runtimeProfile.ping(ctx), "ping runtime")
+		fmt.Fprintln(os.Stderr, "Warming up model…")
+		if err := runtimeProfile.warmup(ctx); err != nil {
+			slog.Warn("warmup failed", "err", err)
 		}
 
-		w := ingest.New(db, groupID).WithOCR(client)
+		w := ingest.New(db, groupID).WithOCR(runtimeProfile.ocr)
 		if *source != "" {
 			w = w.WithSource(*source)
 		}
 		n, err := w.Walk(ctx, fs.Arg(0))
 		must(err, "walk")
 		fmt.Fprintf(os.Stderr, "✓ Queued %d chunks — starting worker (Ctrl+C to stop)\n", n)
-		runWorker(ctx, db, extractor, client, resolveThreshold, llmParallel, groupID)
+		runWorker(ctx, db, runtimeProfile.extractor, runtimeProfile.embedder, resolveThreshold, llmParallel, groupID)
 
 	case "search":
 		fs := flag.NewFlagSet("search", flag.ExitOnError)
-		format    := fs.String("format",     "text", "output format: text|json")
-		maxTokens := fs.Int("max-tokens",    0,      "token budget for output (0 = unlimited)")
+		format := fs.String("format", "text", "output format: text|json")
+		maxTokens := fs.Int("max-tokens", 0, "token budget for output (0 = unlimited)")
 		_ = fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
 			fatalf("usage: ultramemory search [-format text|json] [-max-tokens N] <query>")
 		}
-		must(client.Ping(ctx), "ping ollama")
+		must(runtimeProfile.ping(ctx), "ping runtime")
 		query := strings.Join(fs.Args(), " ")
-		results, err := graph.Search(ctx, db, client, query, groupID, 10)
+		results, err := graph.Search(ctx, db, runtimeProfile.embedder, query, groupID, 10)
 		must(err, "search")
 		printSearch(results, query, *format, *maxTokens)
 
 	case "bench":
 		fs := flag.NewFlagSet("bench", flag.ExitOnError)
-		limit     := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
-		baseline  := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
-		qaModel   := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
-		qaOnly    := fs.Bool("qa-only", false, "skip ingestion, run QA on existing DB (use with -qa-model for fast model swapping)")
+		limit := fs.Int("limit", 0, "max conversations to evaluate (0 = all)")
+		baseline := fs.Bool("baseline", false, "baseline mode: episode FTS only, no graph extraction")
+		qaModel := fs.String("qa-model", "", "override QA answering model: 'mistral-small-2506' etc (default: same as extraction model)")
+		qaOnly := fs.Bool("qa-only", false, "skip ingestion, run QA on existing DB (use with -qa-model for fast model swapping)")
 		judgeModel := fs.String("judge", "", "LLM judge model for semantic evaluation: 'mistral-small-2506' (requires MISTRAL_API_KEY)")
 		_ = fs.Parse(os.Args[2:])
 		if fs.NArg() < 1 {
 			fatalf("usage: ultramemory bench [-limit N] [-baseline] [-qa-model MODEL] [-qa-only] [-judge MODEL] <locomo10.json>")
 		}
 		if !*qaOnly {
-			must(client.Ping(ctx), "ping ollama")
+			must(runtimeProfile.ping(ctx), "ping runtime")
 			fmt.Fprintln(os.Stderr, "Warming up model…")
-			if err := client.Warmup(ctx); err != nil {
+			if err := runtimeProfile.warmup(ctx); err != nil {
 				slog.Warn("warmup failed", "err", err)
 			}
 		}
 
-		mistralKey := os.Getenv("MISTRAL_API_KEY")
-
-		var qaAnswerer llm.Answerer
+		qaAnswerer := runtimeProfile.answerer
 		if *qaModel != "" {
-			if mistralKey == "" {
-				fatalf("MISTRAL_API_KEY not set — required for -qa-model %s", *qaModel)
-			}
-			qaAnswerer = llm.NewMistral(mistralKey, *qaModel)
+			qaAnswerer = mustNewMistralClient(*qaModel, "-qa-model "+*qaModel)
 			slog.Info("QA answerer", "model", *qaModel, "provider", "mistral")
-		}
-		// When extraction runs via Mistral API, QA should too (Ollama doesn't have the model).
-		if qaAnswerer == nil && extractProvider == "mistral" {
-			qaAnswerer = llm.NewMistral(mistralKey, extractModel)
-			slog.Info("QA answerer", "model", extractModel, "provider", "mistral (auto)")
 		}
 
 		var judge bench.Judge
 		if *judgeModel != "" {
-			if mistralKey == "" {
-				fatalf("MISTRAL_API_KEY not set — required for -judge %s", *judgeModel)
-			}
-			judge = llm.NewMistral(mistralKey, *judgeModel)
+			judge = mustNewMistralClient(*judgeModel, "-judge "+*judgeModel)
 			slog.Info("LLM judge", "model", *judgeModel, "provider", "mistral")
 		}
 
-		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, extractor, client, qaAnswerer, judge, resolveThreshold, *limit, *baseline, *qaOnly)
+		result, err := bench.RunLoCoMo(ctx, fs.Arg(0), db, runtimeProfile.extractor, runtimeProfile.embedder, qaAnswerer, judge, resolveThreshold, *limit, *baseline, *qaOnly)
 		must(err, "bench")
 		bench.PrintResult(result)
 
 	case "resolve":
 		fs := flag.NewFlagSet("resolve", flag.ExitOnError)
-		dryRun    := fs.Bool("dry-run", false, "print planned merges without writing")
+		dryRun := fs.Bool("dry-run", false, "print planned merges without writing")
 		threshold := fs.Float64("threshold", 0.85, "cosine similarity threshold (0–1]")
 		_ = fs.Parse(os.Args[2:])
 		if *threshold <= 0 || *threshold > 1 {
@@ -274,7 +232,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "✓ %d communities across %d entities\n", cr.Communities, cr.Entities)
 		}
 		if *detect {
-			if err := graph.GenerateCommunityReports(ctx, db, nil, groupID); err != nil {
+			if err := graph.GenerateCommunityReports(ctx, db, groupID); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: community report generation failed: %v\n", err)
 			}
 		}
@@ -344,8 +302,8 @@ func main() {
 const staleJobTimeout = 5 * time.Minute
 
 // runWorker polls the SQLite queue and processes jobs with max 1 concurrent LLM call.
-// extractor handles entity/edge extraction; embedder handles all embeddings (always Ollama).
-func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, resolveThreshold float64, llmParallel int, groupID string) {
+// extractor handles entity/edge extraction; embedder handles all embeddings for the active build.
+func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor, embedder llm.Embedder, resolveThreshold float64, llmParallel int, groupID string) {
 	ext := graph.New(db, extractor, embedder, resolveThreshold, llmParallel)
 	concurrency := runtime.NumCPU()
 	if concurrency > 4 {
@@ -432,7 +390,7 @@ func runWorker(ctx context.Context, db *store.DB, extractor llm.EntityExtractor,
 				} else {
 					communityDirty = false
 					slog.Info("communities detected", "communities", cr.Communities, "entities", cr.Entities)
-					if err := graph.GenerateCommunityReports(ctx, db, nil, groupID); err != nil {
+					if err := graph.GenerateCommunityReports(ctx, db, groupID); err != nil {
 						slog.Error("community reports failed", "err", err)
 					}
 				}
@@ -609,8 +567,8 @@ func printResolveResult(r store.ResolveResult, dryRun bool) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "ultramemory %s — local knowledge graph (SQLite + Ollama)\n\n", version)
-	fmt.Fprintln(os.Stderr, `Commands:
+	fmt.Fprintf(os.Stderr, "ultramemory %s — local knowledge graph (%s build)\n\n", version, buildProviderName)
+	fmt.Fprintf(os.Stderr, `Commands:
   run     <path>   ingest directory + start worker (all-in-one)  [-source URL]
   ingest  <path>   queue all text files for processing         [-source URL]
   worker           process queued jobs (blocking)
@@ -624,14 +582,10 @@ func usage() {
 
 Environment:
   MEMORY_DB                  path to SQLite file          (default: memory-local.db)
-  MEMORY_OLLAMA              Ollama base URL              (default: http://localhost:11434)
-  MEMORY_MODEL               extraction model             (default: gemma3:4b)
-  MEMORY_EMBED_MODEL         embedding model              (default: mxbai-embed-large)
   MEMORY_GROUP               namespace/group              (default: default)
   MEMORY_RESOLVE_THRESHOLD   resolve similarity           (default: 0.92)
-  MEMORY_LLM_PARALLEL        concurrent LLM calls         (default: 1 for ollama, 4 for mistral)
-  MEMORY_EXTRACT_PROVIDER    extraction backend           (default: ollama; or: mistral)
-  MISTRAL_API_KEY            Mistral API key              (required when provider=mistral)`)
+  MEMORY_LLM_PARALLEL        concurrent LLM calls         (default: %d)
+%s`, defaultLLMParallel, buildEnvironmentHelp)
 }
 
 func envOr(key, fallback string) string {
@@ -639,6 +593,14 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func mustNewMistralClient(model, usage string) *llm.MistralClient {
+	apiKey := os.Getenv("MISTRAL_API_KEY")
+	if apiKey == "" {
+		fatalf("MISTRAL_API_KEY not set — required for %s", usage)
+	}
+	return llm.NewMistral(apiKey, model)
 }
 
 func must(err error, msg string) {

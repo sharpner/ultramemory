@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,20 +13,7 @@ import (
 	"time"
 )
 
-// Answerer is satisfied by any LLM that can answer free-text questions.
-// This allows swapping QA models independently of the extraction model.
-type Answerer interface {
-	Answer(ctx context.Context, system, user string, maxTokens int) (string, error)
-}
-
-// EntityExtractor is satisfied by any LLM that can extract entities and edges.
-// Both *Client (Ollama) and *MistralClient implement this interface.
-type EntityExtractor interface {
-	ExtractEntities(ctx context.Context, content string) (*ExtractedEntities, error)
-	ExtractEdges(ctx context.Context, entities []ExtractedEntity, content string) (*ExtractedEdges, error)
-}
-
-// MistralClient calls the Mistral API (OpenAI-compatible) for QA answering or judging.
+// MistralClient calls the Mistral API for extraction, QA, judging, embeddings and OCR.
 type MistralClient struct {
 	model       string
 	apiKey      string
@@ -39,7 +27,13 @@ func (m *MistralClient) SetTemperature(t float64) { m.temperature = t }
 // Temperature returns the current temperature setting.
 func (m *MistralClient) Temperature() float64 { return m.temperature }
 
-// NewMistral creates a Mistral client (QA answering or judge).
+// Ping is a lightweight readiness hook for provider-agnostic startup paths.
+func (m *MistralClient) Ping(context.Context) error { return nil }
+
+// Warmup is a no-op for hosted Mistral models.
+func (m *MistralClient) Warmup(context.Context) error { return nil }
+
+// NewMistral creates a Mistral client for the provided model.
 func NewMistral(apiKey, model string) *MistralClient {
 	return &MistralClient{
 		model:  model,
@@ -170,6 +164,140 @@ func (m *MistralClient) Answer(ctx context.Context, system, user string, maxToke
 		return "", fmt.Errorf("mistral: no choices in response")
 	}
 	return cr.Choices[0].Message.Content, nil
+}
+
+// Embed generates an embedding vector for the given text.
+func (m *MistralClient) Embed(ctx context.Context, text string) ([]float32, error) {
+	vectors, err := m.EmbedBatch(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != 1 {
+		return nil, fmt.Errorf("mistral embed: got %d vectors for 1 text", len(vectors))
+	}
+	return vectors[0], nil
+}
+
+// EmbedBatch generates embeddings for multiple texts in a single request.
+func (m *MistralClient) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	body := map[string]any{
+		"model": m.model,
+		"input": texts,
+	}
+
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.mistral.ai/v1/embeddings", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+m.apiKey)
+
+	resp, err := m.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mistral embed request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mistral embed HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	}
+
+	var result struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("mistral embed unmarshal: %w", err)
+	}
+	if len(result.Data) != len(texts) {
+		return nil, fmt.Errorf("mistral embed: got %d vectors for %d texts", len(result.Data), len(texts))
+	}
+
+	vectors := make([][]float32, len(result.Data))
+	for _, item := range result.Data {
+		if item.Index < 0 || item.Index >= len(vectors) {
+			return nil, fmt.Errorf("mistral embed: invalid index %d", item.Index)
+		}
+		vectors[item.Index] = item.Embedding
+	}
+	return vectors, nil
+}
+
+// OCR extracts text from an image using Mistral OCR.
+func (m *MistralClient) OCR(ctx context.Context, imageBytes []byte) (string, error) {
+	if len(imageBytes) == 0 {
+		return "", fmt.Errorf("mistral OCR: empty image")
+	}
+
+	contentType := http.DetectContentType(imageBytes)
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = "image/jpeg"
+	}
+
+	body := map[string]any{
+		"model": m.model,
+		"document": map[string]string{
+			"type":      "image_url",
+			"image_url": "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(imageBytes),
+		},
+	}
+
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.mistral.ai/v1/ocr", bytes.NewReader(raw))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+m.apiKey)
+
+	resp, err := m.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("mistral OCR request: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("mistral OCR HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	}
+
+	var result struct {
+		Pages []struct {
+			Markdown string `json:"markdown"`
+		} `json:"pages"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("mistral OCR unmarshal: %w", err)
+	}
+
+	var pages []string
+	for _, page := range result.Pages {
+		text := strings.TrimSpace(page.Markdown)
+		if text == "" {
+			continue
+		}
+		pages = append(pages, text)
+	}
+	if len(pages) == 0 {
+		return "", fmt.Errorf("mistral OCR produced no output")
+	}
+	return strings.Join(pages, "\n\n"), nil
 }
 
 // mistralChat sends a chat request to the Mistral API and returns the raw content string.

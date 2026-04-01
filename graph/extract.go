@@ -23,22 +23,22 @@ type IngestPayload struct {
 
 // Extractor runs the full graph-building pipeline for a document chunk.
 // The semaphore limits concurrent extraction calls.
-// Embedding (mxbai via Ollama) runs outside the semaphore since it uses a different model.
+// Embedding runs outside the semaphore since it may use a different model than extraction.
 type Extractor struct {
 	db               *store.DB
 	extractor        llm.EntityExtractor // entity/edge extraction (Ollama or Mistral API)
-	embedder         *llm.Client         // embeddings always via local Ollama
-	sem              chan struct{}        // limits concurrent LLM extraction calls
-	muEntity         sync.Mutex          // serialise entity upserts to avoid duplicates under concurrency
-	embedWG          sync.WaitGroup      // tracks in-flight embedding goroutines
+	embedder         llm.Embedder
+	sem              chan struct{}  // limits concurrent LLM extraction calls
+	muEntity         sync.Mutex     // serialise entity upserts to avoid duplicates under concurrency
+	embedWG          sync.WaitGroup // tracks in-flight embedding goroutines
 	resolveThreshold float64
 }
 
 // New creates a new Extractor. extractor handles entity/edge extraction (Ollama or Mistral API).
-// embedder handles embeddings and must always be the local Ollama client.
+// embedder handles embeddings for the active build profile.
 // llmParallel controls how many concurrent extraction calls are allowed.
 // resolveThreshold is the minimum cosine similarity for entity deduplication (e.g. 0.92).
-func New(db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, resolveThreshold float64, llmParallel int) *Extractor {
+func New(db *store.DB, extractor llm.EntityExtractor, embedder llm.Embedder, resolveThreshold float64, llmParallel int) *Extractor {
 	if llmParallel < 1 {
 		llmParallel = 1
 	}
@@ -134,7 +134,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 	)
 
 	// ── 5. Batch-embed all entity descriptions + edge facts in one API call ──
-	// Collecting all texts upfront avoids N×round-trips to nomic-embed-text.
+	// Collecting all texts upfront avoids N×round-trips to the embedding backend.
 	// Entities come first (indices 0..len-1), edges follow.
 	batchTexts := make([]string, 0, len(extracted.Entities)+len(edges.Edges))
 	for _, ent := range extracted.Entities {

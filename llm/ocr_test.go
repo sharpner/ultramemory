@@ -1,3 +1,5 @@
+//go:build !mistral
+
 package llm
 
 import (
@@ -7,7 +9,6 @@ import (
 	"testing"
 	"time"
 )
-
 
 func skipIfNoOllamaOCR(t *testing.T, c *Client) {
 	t.Helper()
@@ -68,7 +69,7 @@ func TestOCR_IsRefusal(t *testing.T) {
 }
 
 func TestOCR_DoublePage(t *testing.T) {
-	client := New("http://localhost:11434", "gemma3:4b", "nomic-embed-text")
+	client := New("http://localhost:11434", "gemma3:4b", "mxbai-embed-large")
 	skipIfNoOllamaOCR(t, client)
 
 	data := loadTestScan(t)
@@ -126,7 +127,7 @@ func TestOCR_DoublePage(t *testing.T) {
 }
 
 func TestOCR_RetryOnRefusal(t *testing.T) {
-	client := New("http://localhost:11434", "gemma3:4b", "nomic-embed-text")
+	client := New("http://localhost:11434", "gemma3:4b", "mxbai-embed-large")
 	skipIfNoOllamaOCR(t, client)
 
 	data := loadTestScan(t)

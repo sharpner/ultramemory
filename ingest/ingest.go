@@ -25,14 +25,14 @@ const (
 
 // Walker ingests files into the job queue.
 type Walker struct {
-	db           *store.DB
-	groupID      string
-	sourceOverride string // if set, used as source instead of file path
-	pdftotextBin string // optional: poppler pdftotext
-	pdftoppmBin  string // optional: poppler pdftoppm (needed for OCR fallback)
-	tesseractBin string // optional: Tesseract OCR
-	detexBin     string // optional: opendetex for LaTeX stripping
-	ocrClient    *llm.Client // optional: gemma3 OCR fallback
+	db             *store.DB
+	groupID        string
+	sourceOverride string  // if set, used as source instead of file path
+	pdftotextBin   string  // optional: poppler pdftotext
+	pdftoppmBin    string  // optional: poppler pdftoppm (needed for OCR fallback)
+	tesseractBin   string  // optional: Tesseract OCR
+	detexBin       string  // optional: opendetex for LaTeX stripping
+	ocrClient      llm.OCR // optional: model OCR fallback
 }
 
 // New creates a Walker, detecting available PDF tools on PATH.
@@ -47,7 +47,7 @@ func New(db *store.DB, groupID string) *Walker {
 		slog.Warn("pdftotext not found — digital PDFs will be skipped (install poppler)")
 	}
 	if w.tesseractBin == "" {
-		slog.Warn("tesseract not found — scanned PDFs will fall back to gemma3 OCR (lower accuracy)")
+		slog.Warn("tesseract not found — scanned PDFs will fall back to model OCR when configured")
 	}
 	return w
 }
@@ -58,9 +58,9 @@ func (w *Walker) WithSource(source string) *Walker {
 	return w
 }
 
-// WithOCR attaches a gemma3 client as last-resort OCR fallback for scanned PDFs.
+// WithOCR attaches a model OCR client as last-resort fallback for scanned PDFs.
 // Only used when both pdftotext and tesseract produce no output.
-func (w *Walker) WithOCR(client *llm.Client) *Walker {
+func (w *Walker) WithOCR(client llm.OCR) *Walker {
 	w.ocrClient = client
 	return w
 }
@@ -116,7 +116,7 @@ func (w *Walker) Walk(ctx context.Context, root string) (int, error) {
 	return total, err
 }
 
-// extractPDF tries pdftotext → tesseract → gemma3 in order.
+// extractPDF tries pdftotext → tesseract → model OCR in order.
 func (w *Walker) extractPDF(ctx context.Context, path string) (string, error) {
 	// 1. pdftotext
 	if w.pdftotextBin != "" {
@@ -140,11 +140,11 @@ func (w *Walker) extractPDF(ctx context.Context, path string) (string, error) {
 		slog.Warn("tesseract failed", "path", path, "err", err)
 	}
 
-	// 3. gemma3 fallback
+	// 3. model OCR fallback
 	if w.ocrClient != nil {
-		slog.Warn("⚠ using gemma3 OCR fallback — accuracy is lower than Tesseract; install tesseract for better results",
+		slog.Warn("using model OCR fallback — accuracy is lower than Tesseract; install tesseract for better results",
 			"path", path)
-		return w.ocrPDFGemma3(ctx, path)
+		return w.ocrPDFModel(ctx, path)
 	}
 
 	return "", fmt.Errorf("scanned PDF: no OCR available (install tesseract)")
@@ -174,7 +174,7 @@ func (w *Walker) ocrPDFTesseract(ctx context.Context, pdfPath string) (string, e
 	return strings.Join(texts, "\n\n"), nil
 }
 
-func (w *Walker) ocrPDFGemma3(ctx context.Context, pdfPath string) (string, error) {
+func (w *Walker) ocrPDFModel(ctx context.Context, pdfPath string) (string, error) {
 	pages, cleanup, err := w.pdfToImages(ctx, pdfPath)
 	if err != nil {
 		return "", err
@@ -190,7 +190,7 @@ func (w *Walker) ocrPDFGemma3(ctx context.Context, pdfPath string) (string, erro
 		}
 		out, err := w.ocrClient.OCR(ctx, data)
 		if err != nil {
-			slog.Warn("gemma3 OCR page failed", "page", page, "err", err)
+			slog.Warn("model OCR page failed", "page", page, "err", err)
 			continue
 		}
 		if out != "" {
@@ -198,7 +198,7 @@ func (w *Walker) ocrPDFGemma3(ctx context.Context, pdfPath string) (string, erro
 		}
 	}
 	if len(texts) == 0 {
-		return "", fmt.Errorf("gemma3 OCR produced no output")
+		return "", fmt.Errorf("model OCR produced no output")
 	}
 	return strings.Join(texts, "\n\n"), nil
 }

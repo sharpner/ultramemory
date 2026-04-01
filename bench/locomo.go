@@ -128,12 +128,12 @@ type QA struct {
 
 // CategoryScore holds aggregated metrics for one QA category.
 type CategoryScore struct {
-	Category    string
-	Count       int
-	AvgF1       float64
-	AvgEM       float64
-	AvgJudge    float64 // LLM-judge score (0 if no judge configured)
-	JudgeCount  int     // number of judged answers
+	Category   string
+	Count      int
+	AvgF1      float64
+	AvgEM      float64
+	AvgJudge   float64 // LLM-judge score (0 if no judge configured)
+	JudgeCount int     // number of judged answers
 }
 
 // Result holds the full benchmark output.
@@ -145,10 +145,10 @@ type Result struct {
 }
 
 type qaScore struct {
-	category  int
-	f1        float64
-	em        float64
-	judge     float64 // 1.0 = correct per LLM judge, 0 = incorrect, -1 = not judged
+	category int
+	f1       float64
+	em       float64
+	judge    float64 // 1.0 = correct per LLM judge, 0 = incorrect, -1 = not judged
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -161,10 +161,10 @@ type Judge interface {
 // RunLoCoMo evaluates ultramemory against the LoCoMo benchmark.
 // Set limit > 0 to evaluate only the first N conversations.
 // When baseline is true, only raw episode FTS is used (no graph extraction).
-// qaAnswerer overrides the QA answering model when set (extraction always uses client).
+// qaAnswerer overrides the QA answering model when set.
 // When qaOnly is true, ingestion is skipped — DB must already be populated.
 // judge optionally evaluates each answer for semantic correctness (LLM-as-judge).
-func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm.EntityExtractor, client *llm.Client, qaAnswerer llm.Answerer, judge Judge, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
+func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm.EntityExtractor, embedder llm.Embedder, answerer llm.Answerer, judge Judge, resolveThreshold float64, limit int, baseline, qaOnly bool) (*Result, error) {
 	conversations, err := parseLoCoMo(dataPath)
 	if err != nil {
 		return nil, err
@@ -178,10 +178,16 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm
 		mode = "baseline"
 	}
 
-	// Fall back to client if no dedicated QA answerer provided.
-	answerer := qaAnswerer
 	if answerer == nil {
-		answerer = client
+		type defaultAnswerer interface {
+			llm.EntityExtractor
+			llm.Answerer
+		}
+		qaClient, ok := extractor.(defaultAnswerer)
+		if !ok {
+			return nil, fmt.Errorf("extractor does not implement llm.Answerer")
+		}
+		answerer = qaClient
 	}
 
 	start := time.Now()
@@ -221,11 +227,12 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm
 						}); err != nil {
 							slog.Warn("episode insert failed", "err", err)
 						}
-					} else {
-						ext := graph.New(db, extractor, client, resolveThreshold, 1)
-						if err := ext.Process(ctx, chunk, source, groupID); err != nil {
-							slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
-						}
+						continue
+					}
+
+					ext := graph.New(db, extractor, embedder, resolveThreshold, 1)
+					if err := ext.Process(ctx, chunk, source, groupID); err != nil {
+						slog.Warn("extraction failed", "conv", conv.SampleID, "session", sess.Number, "err", err)
 					}
 				}
 			}
@@ -242,7 +249,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm
 						"entities", result.Entities,
 					)
 					// Generate LLM community reports (≥3 members only).
-					if err := graph.GenerateCommunityReports(ctx, db, client, groupID); err != nil {
+					if err := graph.GenerateCommunityReports(ctx, db, groupID); err != nil {
 						slog.Warn("community report generation failed", "err", err)
 					}
 				}
@@ -284,7 +291,7 @@ func RunLoCoMo(ctx context.Context, dataPath string, db *store.DB, extractor llm
 				}
 				contextStr = formatEpisodeContext(episodes)
 			} else {
-				results, err := graph.Search(ctx, db, client, qa.Question, groupID, 25)
+				results, err := graph.Search(ctx, db, embedder, qa.Question, groupID, 25)
 				if err != nil {
 					slog.Warn("search failed", "question", qa.Question, "err", err)
 					scores = append(scores, qaScore{qa.Category, 0, 0, -1})

@@ -5,7 +5,11 @@ Portable knowledge graph builder for local documents. Single Go binary, no cloud
 ## Dependencies
 
 - **Go** (build time)
-- **Ollama** (runtime) with these models pulled:
+- One runtime profile:
+  - **Default build**: local Ollama with `gemma3:4b` and `mxbai-embed-large`
+  - **`mistral` build tag**: `MISTRAL_API_KEY` plus Mistral API access for extraction, embeddings and OCR fallback
+
+### Default build (`go build .`)
 
 ```bash
 ollama pull gemma3:4b          # entity/edge extraction
@@ -25,10 +29,10 @@ OLLAMA_KEEP_ALIVE=30m ollama serve
 | `pdftotext` (poppler) | Extract text from digital PDFs | `brew install poppler` |
 | `tesseract` | OCR for scanned PDFs (**recommended**) | `brew install tesseract` |
 
-Without these tools, PDFs are skipped. Without `tesseract`, scanned PDFs fall back to gemma3 vision OCR — this works but produces lower accuracy output and logs a warning:
+Without these tools, PDFs are skipped. Without `tesseract`, scanned PDFs fall back to the active model OCR backend — this works but produces lower accuracy output and logs a warning:
 
 ```
-⚠ using gemma3 OCR fallback — accuracy is lower than Tesseract; install tesseract for better results
+using model OCR fallback — accuracy is lower than Tesseract; install tesseract for better results
 ```
 
 ## Install
@@ -40,7 +44,11 @@ go install github.com/sharpner/ultramemory@latest
 Or build from source:
 
 ```bash
+# Default build: pure Ollama binary
 go build -o ultramemory .
+
+# Pure Mistral binary
+go build -tags mistral -o ultramemory .
 ```
 
 ## Supported formats
@@ -52,7 +60,7 @@ go build -o ultramemory .
 | Data / Config | `.json`, `.yaml`, `.yml`, `.toml`, `.env`, `.sql`, `.graphql`, `.proto` | direct UTF-8 read |
 | LaTeX / BibTeX | `.tex`, `.bib` | direct UTF-8 read |
 | PDF (digital) | `.pdf` | `pdftotext` (poppler) |
-| PDF (scanned) | `.pdf` | `tesseract` OCR, gemma3 vision fallback |
+| PDF (scanned) | `.pdf` | `tesseract` OCR, active model OCR fallback |
 
 ## Usage
 
@@ -68,9 +76,9 @@ ultramemory worker             # process queue (runs until Ctrl+C)
 ultramemory ingest -source "https://arxiv.org/abs/2511.01815" ./paper/
 ultramemory run -source "https://arxiv.org/abs/2511.01815" ./paper/
 
-# Cloud extraction via Mistral API (much faster, requires API key)
-MISTRAL_API_KEY=sk-... MEMORY_EXTRACT_PROVIDER=mistral \
-  MEMORY_MODEL=ministral-8b-latest ultramemory run ./my-docs
+# Pure Mistral build
+go build -tags mistral -o ultramemory .
+MISTRAL_API_KEY=sk-... ./ultramemory run ./my-docs
 
 # Search the graph
 ultramemory search "Alice Schmidt TechCorp"
@@ -89,32 +97,46 @@ ultramemory status
 
 ## Environment
 
-| Variable           | Default                   | Description                      |
-|--------------------|---------------------------|----------------------------------|
-| `MEMORY_DB`        | `memory-local.db`         | SQLite database path             |
-| `MEMORY_OLLAMA`    | `http://localhost:11434`  | Ollama base URL                  |
-| `MEMORY_MODEL`     | `gemma3:4b`               | Entity/edge extraction model     |
-| `MEMORY_EMBED_MODEL` | `mxbai-embed-large`     | Embedding model (1024-dim)       |
-| `MEMORY_GROUP`     | `default`                 | Namespace for graph isolation    |
-| `MEMORY_RESOLVE_THRESHOLD` | `0.92`          | Cosine similarity threshold for entity deduplication (0–1) |
-| `MEMORY_LLM_PARALLEL`       | `1`           | Concurrent extraction calls (match `OLLAMA_NUM_PARALLEL`) |
-| `MEMORY_EXTRACT_PROVIDER` | `ollama`        | Extraction backend: `ollama` (local) or `mistral` (API) |
-| `MISTRAL_API_KEY`         |                 | Mistral API key (required when provider=mistral) |
+### Shared
 
-### Mistral API mode
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMORY_DB` | `memory-local.db` | SQLite database path |
+| `MEMORY_GROUP` | `default` | Namespace for graph isolation |
+| `MEMORY_RESOLVE_THRESHOLD` | `0.92` | Cosine similarity threshold for entity deduplication (0–1) |
+| `MEMORY_LLM_PARALLEL` | build-dependent | Concurrent extraction calls |
 
-Use `MEMORY_EXTRACT_PROVIDER=mistral` to run entity/edge extraction via Mistral's API instead of local Ollama. Embedding stays local (mxbai-embed-large via Ollama). This is useful for:
+### Default Ollama build
 
-- **Bulk ingestion** — API handles concurrent requests, default `MEMORY_LLM_PARALLEL=4`
-- **Faster models** — `ministral-3b-latest` (~1s/chunk) or `ministral-8b-latest` (~3s/chunk)
-- **No GPU needed** for extraction (only embedding needs Ollama)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMORY_OLLAMA` | `http://localhost:11434` | Ollama base URL |
+| `MEMORY_MODEL` | `gemma3:4b` | Entity/edge extraction model |
+| `MEMORY_EMBED_MODEL` | `mxbai-embed-large` | Embedding model |
+
+### `mistral` build tag
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMORY_MODEL` | `mistral-3b-latest` | Entity/edge extraction model |
+| `MEMORY_EMBED_MODEL` | `mistral-embed` | Embedding model |
+| `MISTRAL_API_KEY` | required | Mistral API key |
+
+## Build profiles
+
+- `go build .`
+  - Pure Ollama binary
+  - Default DB format: `ollama-v1`
+  - Uses `gemma3:4b` + `mxbai-embed-large`
+- `go build -tags mistral .`
+  - Pure Mistral binary
+  - Default DB format: `mistral-v1`
+  - Uses `mistral-3b-latest` + `mistral-embed`
+
+The database format is stamped on first open. An `ollama-v1` binary refuses a `mistral-v1` database, and vice versa:
 
 ```bash
-export MISTRAL_API_KEY=sk-...
-export MEMORY_EXTRACT_PROVIDER=mistral
-export MEMORY_MODEL=ministral-8b-latest   # or ministral-3b-latest for speed
-
-ultramemory run ./papers/
+error: open db: wrong db format: expected mistral-v1, found ollama-v1
 ```
 
 ## JSON API
@@ -171,8 +193,8 @@ ultramemory status -format json
 ## How it works
 
 1. **Ingest**: Files are chunked (1500 chars, 150 overlap) and enqueued as SQLite jobs
-2. **Extract**: gemma3:4b extracts named entities and relationships from each chunk
-3. **Embed**: mxbai-embed-large generates 1024-dim vectors for semantic search
+2. **Extract**: the active build profile extracts named entities and relationships from each chunk
+3. **Embed**: the active embedding backend generates vectors for semantic search
 4. **Search**: Hybrid FTS5 + cosine similarity fused via RRF, then extended by MAGMA graph traversal
 
 ### Search pipeline detail
@@ -191,7 +213,7 @@ Query
       └─ Graph-traversal results appended after direct RRF matches
 ```
 
-Max 1 concurrent gemma3:4b call — resource-friendly on consumer hardware.
+Default build uses one concurrent local extraction call. The `mistral` build defaults to four concurrent extraction calls.
 
 ## Acknowledgements
 

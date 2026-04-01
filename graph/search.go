@@ -15,17 +15,17 @@ import (
 
 // SearchResult is one item returned from hybrid search.
 type SearchResult struct {
-	Type    string  // "entity" | "edge" | "episode"
+	Type    string // "entity" | "edge" | "episode"
 	UUID    string
-	Title   string  // entity name, edge relation_type, or episode source
-	Body    string  // edge fact, entity type, or episode content snippet
+	Title   string // entity name, edge relation_type, or episode source
+	Body    string // edge fact, entity type, or episode content snippet
 	Score   float64
-	Source  string  // originating source file
-	ValidAt string  // ISO 8601 date when edge fact became true (empty if unknown)
+	Source  string // originating source file
+	ValidAt string // ISO 8601 date when edge fact became true (empty if unknown)
 }
 
 // Search performs triple-signal hybrid search (FTS + vector + MAGMA graph via RRF).
-func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupID string, limit int) ([]SearchResult, error) {
+func Search(ctx context.Context, db *store.DB, embedder llm.Embedder, query, groupID string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -45,7 +45,7 @@ func Search(ctx context.Context, db *store.DB, client *llm.Client, query, groupI
 	}
 
 	// ── 2. Vector search ──────────────────────────────────────────────────────
-	qEmb, err := client.Embed(ctx, query)
+	qEmb, err := embedder.Embed(ctx, query)
 	if err != nil {
 		slog.Warn("query embedding failed, falling back to FTS-only search", "err", err)
 		qEmb = nil
