@@ -34,6 +34,7 @@ var (
 	reInlineMath         = regexp.MustCompile(`\$[^$]+?\$`)
 	reCiteRef            = regexp.MustCompile(`\\(?:citep?|citet|ref|cref|label|eqref)\{[^}]*\}`)
 	reGenericCommand     = regexp.MustCompile(`\\[a-zA-Z]+`)
+	reFrontMatterCmd     = regexp.MustCompile(`\\(?:title|author)\b`)
 )
 
 // sanitizeTeX converts a .tex file to clean prose via:
@@ -212,6 +213,8 @@ func (w *Walker) runDetex(ctx context.Context, text string) (string, error) {
 // fallbackStrip does lightweight LaTeX stripping when detex is not installed.
 // Less thorough than detex but catches the worst noise sources.
 func fallbackStrip(text string) string {
+	frontMatter := extractFrontMatter(text)
+
 	// Strip preamble.
 	if idx := strings.Index(text, `\begin{document}`); idx >= 0 {
 		text = text[idx+len(`\begin{document}`):]
@@ -250,7 +253,34 @@ func fallbackStrip(text string) string {
 	text = strings.ReplaceAll(text, "{", "")
 	text = strings.ReplaceAll(text, "}", "")
 
+	if frontMatter != "" {
+		text = frontMatter + "\n\n" + text
+	}
+
 	return text
+}
+
+func extractFrontMatter(text string) string {
+	var parts []string
+
+	for _, loc := range reFrontMatterCmd.FindAllStringIndex(text, -1) {
+		body := extractBraced(text, loc[1])
+		if body == "" {
+			continue
+		}
+
+		body = strings.ReplaceAll(body, `\\`, "\n")
+		body = strings.ReplaceAll(body, `\&`, " & ")
+		body = reInlineMath.ReplaceAllString(body, "")
+		body = reFormatCmd.ReplaceAllString(body, "$1")
+		body = strings.TrimSpace(body)
+		if body == "" {
+			continue
+		}
+		parts = append(parts, body)
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 // cleanDetexOutput removes residual noise from detex output.

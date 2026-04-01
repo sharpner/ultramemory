@@ -135,6 +135,35 @@ After document should be stripped.`
 	}
 }
 
+func TestFallbackStripPreservesFrontMatter(t *testing.T) {
+	tex := `\documentclass{article}
+\title{KVTC: Compressing LLMs}
+\author{Konrad Staniszewski\\NVIDIA \& University of Warsaw}
+\begin{document}
+\maketitle
+\section{Introduction}
+We present KVTC.
+\end{document}`
+
+	got := fallbackStrip(tex)
+
+	for _, want := range []string{
+		"KVTC: Compressing LLMs",
+		"Konrad Staniszewski",
+		"NVIDIA",
+		"University of Warsaw",
+		"We present KVTC.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fallbackStrip front matter: missing %q in %q", want, got)
+		}
+	}
+
+	if strings.Contains(got, `\maketitle`) {
+		t.Errorf("fallbackStrip front matter: maketitle leaked in %q", got)
+	}
+}
+
 func TestSanitizeTeX_RealPaper(t *testing.T) {
 	// Use KVTC paper if available.
 	paperDir := filepath.Join(os.Getenv("HOME"), ".cache/nanochat/knowledge/2511.01815")
