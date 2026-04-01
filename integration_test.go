@@ -1,5 +1,7 @@
+//go:build !mistral
+
 // Integration tests for memory-local.
-// Requires Ollama running locally with gemma3:4b and nomic-embed-text pulled.
+// Requires Ollama running locally with gemma3:4b and mxbai-embed-large pulled.
 // Run with: go test ./cmd/memory-local/ -v -timeout 5m -run TestIntegration
 package main
 
@@ -19,7 +21,7 @@ import (
 const (
 	testOllamaURL      = "http://localhost:11434"
 	testExtractModel   = "gemma3:4b"
-	testEmbeddingModel = "nomic-embed-text"
+	testEmbeddingModel = "mxbai-embed-large"
 	testGroupID        = "test"
 )
 
@@ -79,7 +81,7 @@ func TestIntegrationIngestAndSearch(t *testing.T) {
 		if job == nil {
 			break // queue empty
 		}
-		if err := ext.ProcessJob(ctx, job.Payload); err != nil {
+		if err := ext.ProcessJob(ctx, job.Payload, job.Attempts); err != nil {
 			t.Logf("job %d failed: %v", job.ID, err)
 			if err2 := db.FailJob(ctx, job.ID, err.Error()); err2 != nil {
 				t.Fatalf("fail job: %v", err2)
@@ -118,8 +120,8 @@ func TestIntegrationIngestAndSearch(t *testing.T) {
 	// Recall: each query must find the expected entity despite noise documents.
 	// Precision: the correct entity must rank HIGHER than the confusable noise entity.
 	recallCases := []struct {
-		query    string
-		contains string // must appear in results (recall)
+		query     string
+		contains  string // must appear in results (recall)
 		rankAbove string // must rank higher than this confusable entity (precision)
 	}{
 		// Alice Schmidt (engineer) must rank above Alice Cooper (musician)

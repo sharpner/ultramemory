@@ -19,6 +19,11 @@ import (
 // Schema only contains DDL.
 const schema = `
 
+CREATE TABLE IF NOT EXISTS db_meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS episodes (
 	uuid        TEXT PRIMARY KEY,
 	content     TEXT NOT NULL,
@@ -125,6 +130,21 @@ const migrations = `
 ALTER TABLE entities ADD COLUMN community_id INTEGER NOT NULL DEFAULT -1;
 ALTER TABLE entities ADD COLUMN description TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_entities_community ON entities(group_id, community_id);
+CREATE TABLE IF NOT EXISTS edge_curvatures (
+	source_uuid TEXT NOT NULL,
+	target_uuid TEXT NOT NULL,
+	group_id    TEXT NOT NULL,
+	curvature   REAL NOT NULL,
+	PRIMARY KEY (source_uuid, target_uuid, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_curvatures_group ON edge_curvatures(group_id, curvature);
+CREATE TABLE IF NOT EXISTS mutual_knn_edges (
+	source_uuid TEXT NOT NULL,
+	target_uuid TEXT NOT NULL,
+	group_id   TEXT NOT NULL,
+	PRIMARY KEY (source_uuid, target_uuid, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mknn_group ON mutual_knn_edges(group_id);
 `
 
 // DB wraps a SQLite database connection.
@@ -143,10 +163,16 @@ func Open(path string) (*DB, error) {
 	conn.SetMaxOpenConns(4)
 	conn.SetMaxIdleConns(2)
 
+	if err := ensureDBFormat(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	if _, err := conn.ExecContext(context.Background(), schema); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	if err := runMigrations(conn); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 	return &DB{sql: conn}, nil
@@ -182,6 +208,83 @@ func runMigrations(conn *sql.DB) error {
 			continue
 		}
 		return fmt.Errorf("migration %q: %w", m, err)
+	}
+	return nil
+}
+
+func ensureDBFormat(conn *sql.DB) error {
+	legacy, err := hasLegacySchema(conn)
+	if err != nil {
+		return err
+	}
+
+	if _, err := conn.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS db_meta (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("ensure db_meta: %w", err)
+	}
+
+	var actual string
+	err = conn.QueryRowContext(context.Background(),
+		`SELECT value FROM db_meta WHERE key = ?`, DBFormatKey,
+	).Scan(&actual)
+	if err == nil {
+		if actual == currentDBFormat {
+			return nil
+		}
+		return &DBFormatMismatchError{
+			Expected: currentDBFormat,
+			Actual:   actual,
+		}
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("read db format: %w", err)
+	}
+
+	stampedFormat := currentDBFormat
+	if legacy {
+		stampedFormat = DBFormatOllama
+	}
+
+	if err := stampDBFormat(conn, stampedFormat); err != nil {
+		return err
+	}
+
+	if stampedFormat == currentDBFormat {
+		return nil
+	}
+
+	return &DBFormatMismatchError{
+		Expected: currentDBFormat,
+		Actual:   stampedFormat,
+	}
+}
+
+func hasLegacySchema(conn *sql.DB) (bool, error) {
+	var table string
+	err := conn.QueryRowContext(context.Background(), `
+		SELECT name
+		  FROM sqlite_master
+		 WHERE type = 'table'
+		   AND name NOT LIKE 'sqlite_%'
+		   AND name != 'db_meta'
+		 LIMIT 1`,
+	).Scan(&table)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect legacy schema: %w", err)
+}
+
+func stampDBFormat(conn *sql.DB, format string) error {
+	if _, err := conn.ExecContext(context.Background(),
+		`INSERT INTO db_meta (key, value) VALUES (?, ?)`, DBFormatKey, format,
+	); err != nil {
+		return fmt.Errorf("stamp db format: %w", err)
 	}
 	return nil
 }

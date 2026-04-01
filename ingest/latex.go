@@ -34,6 +34,7 @@ var (
 	reInlineMath         = regexp.MustCompile(`\$[^$]+?\$`)
 	reCiteRef            = regexp.MustCompile(`\\(?:citep?|citet|ref|cref|label|eqref)\{[^}]*\}`)
 	reGenericCommand     = regexp.MustCompile(`\\[a-zA-Z]+`)
+	reFrontMatterCmd     = regexp.MustCompile(`\\(?:title|author)\b`)
 )
 
 // sanitizeTeX converts a .tex file to clean prose via:
@@ -46,9 +47,12 @@ func (w *Walker) sanitizeTeX(ctx context.Context, path string) (string, error) {
 		return "", fmt.Errorf("read tex: %w", err)
 	}
 	text := string(raw)
+	dir := filepath.Dir(path)
+
+	// Step 0: resolve \input{file} and \include{file} references.
+	text = resolveTeXInputs(text, dir, 3) // max depth 3
 
 	// Step 1: resolve custom macros from .sty files in the same directory.
-	dir := filepath.Dir(path)
 	macros := parseMacros(dir)
 	text = applyMacros(text, macros)
 
@@ -58,6 +62,37 @@ func (w *Walker) sanitizeTeX(ctx context.Context, path string) (string, error) {
 	// Step 3: clean up residual noise.
 	text = cleanDetexOutput(text)
 	return text, nil
+}
+
+// reInput matches \input{file} and \include{file} (with or without .tex extension).
+var reInput = regexp.MustCompile(`\\(?:input|include)\{([^}]+)\}`)
+
+// resolveTeXInputs replaces \input{file} with the contents of that file.
+// Searches for file.tex if the bare name doesn't exist. Recurses up to maxDepth.
+func resolveTeXInputs(text, dir string, maxDepth int) string {
+	if maxDepth <= 0 {
+		return text
+	}
+	return reInput.ReplaceAllStringFunc(text, func(match string) string {
+		sub := reInput.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		name := sub[1]
+		candidates := []string{
+			filepath.Join(dir, name),
+			filepath.Join(dir, name+".tex"),
+		}
+		for _, path := range candidates {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			// Recurse for nested inputs.
+			return resolveTeXInputs(string(data), filepath.Dir(path), maxDepth-1)
+		}
+		return "" // file not found — remove the \input command
+	})
 }
 
 // stripLaTeX runs detex if available, falling back to Go stripper if detex
@@ -150,18 +185,33 @@ func applyMacros(text string, macros map[string]string) string {
 }
 
 // runDetex writes text to a temp file and runs detex on it.
-func (w *Walker) runDetex(ctx context.Context, text string) (string, error) {
+func (w *Walker) runDetex(ctx context.Context, text string) (_ string, err error) {
 	tmp, err := os.CreateTemp("", "ultramemory-detex-*.tex")
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(tmp.Name())
+	tmpName := tmp.Name()
+	defer func() {
+		removeErr := os.Remove(tmpName)
+		if removeErr == nil {
+			return
+		}
+		if err != nil {
+			return
+		}
+		err = fmt.Errorf("remove detex temp file: %w", removeErr)
+	}()
 
 	if _, err := tmp.WriteString(text); err != nil {
-		tmp.Close()
-		return "", err
+		closeErr := tmp.Close()
+		if closeErr == nil {
+			return "", err
+		}
+		return "", fmt.Errorf("write detex temp file: %w (close temp file: %v)", err, closeErr)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close detex temp file: %w", err)
+	}
 
 	out, err := exec.CommandContext(ctx, w.detexBin, "-l", tmp.Name()).Output()
 	if err != nil {
@@ -178,6 +228,8 @@ func (w *Walker) runDetex(ctx context.Context, text string) (string, error) {
 // fallbackStrip does lightweight LaTeX stripping when detex is not installed.
 // Less thorough than detex but catches the worst noise sources.
 func fallbackStrip(text string) string {
+	frontMatter := extractFrontMatter(text)
+
 	// Strip preamble.
 	if idx := strings.Index(text, `\begin{document}`); idx >= 0 {
 		text = text[idx+len(`\begin{document}`):]
@@ -216,7 +268,34 @@ func fallbackStrip(text string) string {
 	text = strings.ReplaceAll(text, "{", "")
 	text = strings.ReplaceAll(text, "}", "")
 
+	if frontMatter != "" {
+		text = frontMatter + "\n\n" + text
+	}
+
 	return text
+}
+
+func extractFrontMatter(text string) string {
+	var parts []string
+
+	for _, loc := range reFrontMatterCmd.FindAllStringIndex(text, -1) {
+		body := extractBraced(text, loc[1])
+		if body == "" {
+			continue
+		}
+
+		body = strings.ReplaceAll(body, `\\`, "\n")
+		body = strings.ReplaceAll(body, `\&`, " & ")
+		body = reInlineMath.ReplaceAllString(body, "")
+		body = reFormatCmd.ReplaceAllString(body, "$1")
+		body = strings.TrimSpace(body)
+		if body == "" {
+			continue
+		}
+		parts = append(parts, body)
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 // cleanDetexOutput removes residual noise from detex output.

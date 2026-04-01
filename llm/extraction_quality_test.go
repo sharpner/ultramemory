@@ -1,3 +1,5 @@
+//go:build !mistral
+
 // Extraction quality tests — require Ollama with gemma3:4b.
 // Run with: go test ./llm/ -v -timeout 5m -run TestExtractionQuality
 //
@@ -14,7 +16,7 @@ import (
 )
 
 func newTestClient() *Client {
-	return New("http://localhost:11434", "gemma3:4b", "nomic-embed-text")
+	return New("http://localhost:11434", "gemma3:4b", "mxbai-embed-large")
 }
 
 func skipIfNoOllama(t *testing.T, c *Client) {

@@ -23,22 +23,22 @@ type IngestPayload struct {
 
 // Extractor runs the full graph-building pipeline for a document chunk.
 // The semaphore limits concurrent extraction calls.
-// Embedding (mxbai via Ollama) runs outside the semaphore since it uses a different model.
+// Embedding runs outside the semaphore since it may use a different model than extraction.
 type Extractor struct {
 	db               *store.DB
 	extractor        llm.EntityExtractor // entity/edge extraction (Ollama or Mistral API)
-	embedder         *llm.Client         // embeddings always via local Ollama
-	sem              chan struct{}        // limits concurrent LLM extraction calls
-	muEntity         sync.Mutex          // serialise entity upserts to avoid duplicates under concurrency
-	embedWG          sync.WaitGroup      // tracks in-flight embedding goroutines
+	embedder         llm.Embedder
+	sem              chan struct{}  // limits concurrent LLM extraction calls
+	muEntity         sync.Mutex     // serialise entity upserts to avoid duplicates under concurrency
+	embedWG          sync.WaitGroup // tracks in-flight embedding goroutines
 	resolveThreshold float64
 }
 
 // New creates a new Extractor. extractor handles entity/edge extraction (Ollama or Mistral API).
-// embedder handles embeddings and must always be the local Ollama client.
+// embedder handles embeddings for the active build profile.
 // llmParallel controls how many concurrent extraction calls are allowed.
 // resolveThreshold is the minimum cosine similarity for entity deduplication (e.g. 0.92).
-func New(db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, resolveThreshold float64, llmParallel int) *Extractor {
+func New(db *store.DB, extractor llm.EntityExtractor, embedder llm.Embedder, resolveThreshold float64, llmParallel int) *Extractor {
 	if llmParallel < 1 {
 		llmParallel = 1
 	}
@@ -52,12 +52,32 @@ func New(db *store.DB, extractor llm.EntityExtractor, embedder *llm.Client, reso
 }
 
 // ProcessJob deserialises a queue job and runs the full extraction pipeline.
-func (e *Extractor) ProcessJob(ctx context.Context, payload string) error {
+// attempts indicates how many previous failures occurred — used to increase
+// LLM temperature on retries so the model produces different output.
+func (e *Extractor) ProcessJob(ctx context.Context, payload string, attempts int) error {
 	var p IngestPayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
 		return fmt.Errorf("decode payload: %w", err)
 	}
+
+	// On retries, bump temperature to get different LLM output.
+	// attempt 0 → temp 0 (deterministic), 1 → 0.3, 2 → 0.6
+	temp := float64(attempts) * 0.3
+	if temp > 0.8 {
+		temp = 0.8
+	}
+	e.setExtractorTemperature(temp)
+	defer e.setExtractorTemperature(0) // reset for next job
+
 	return e.Process(ctx, p.Content, p.Source, p.GroupID)
+}
+
+// setExtractorTemperature sets temperature on whichever LLM backend is active.
+func (e *Extractor) setExtractorTemperature(t float64) {
+	type tempSetter interface{ SetTemperature(float64) }
+	if ts, ok := e.extractor.(tempSetter); ok {
+		ts.SetTemperature(t)
+	}
 }
 
 // Process runs entity extraction, edge extraction, and embedding for one text chunk.
@@ -114,7 +134,7 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 	)
 
 	// ── 5. Batch-embed all entity descriptions + edge facts in one API call ──
-	// Collecting all texts upfront avoids N×round-trips to nomic-embed-text.
+	// Collecting all texts upfront avoids N×round-trips to the embedding backend.
 	// Entities come first (indices 0..len-1), edges follow.
 	batchTexts := make([]string, 0, len(extracted.Entities)+len(edges.Edges))
 	for _, ent := range extracted.Entities {
@@ -172,6 +192,14 @@ func (e *Extractor) Process(ctx context.Context, content, source, groupID string
 
 		if err := e.db.LinkEntityEpisode(ctx, canonical, epUUID); err != nil {
 			return fmt.Errorf("link entity-episode: %w", err)
+		}
+
+		// Incremental mutual-kNN update: integrate new entity into the
+		// semantic neighbor graph. Cost: O(n × d), ~100ms at 100k entities.
+		if vec != nil {
+			if err := e.db.UpdateMutualKNN(ctx, canonical, groupID, vec, 20); err != nil {
+				slog.Debug("mutual-knn update failed", "entity", ent.Name, "err", err)
+			}
 		}
 	}
 

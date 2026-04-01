@@ -20,6 +20,7 @@ func TestProcess_EntityCreated(t *testing.T) {
 	if err := ext.Process(ctx, "Jonathan Harker travels to meet Count Dracula.", "test.txt", "g"); err != nil {
 		t.Fatal(err)
 	}
+	ext.Wait()
 
 	n, err := db.CountEntities(ctx, "g")
 	if err != nil {
@@ -42,6 +43,7 @@ func TestProcess_EdgeCreated(t *testing.T) {
 	if err := ext.Process(ctx, "Jonathan Harker travels to meet Count Dracula.", "test.txt", "g"); err != nil {
 		t.Fatal(err)
 	}
+	ext.Wait()
 
 	n, err := db.CountEdges(ctx, "g")
 	if err != nil {
@@ -64,6 +66,7 @@ func TestProcess_EpisodeLinked(t *testing.T) {
 	if err := ext.Process(ctx, "Jonathan Harker arrived at the castle.", "castle.txt", "g"); err != nil {
 		t.Fatal(err)
 	}
+	ext.Wait()
 
 	n, err := db.CountEpisodes(ctx, "g")
 	if err != nil {
@@ -84,6 +87,7 @@ func TestProcess_ExactNameDedup(t *testing.T) {
 	if err := ext.Process(ctx, "Jonathan Harker arrived.", "a.txt", "g"); err != nil {
 		t.Fatal(err)
 	}
+	ext.Wait()
 
 	client2 := newMockClient(t, entityJSON("JONATHAN HARKER"), `{"edges":[]}`)
 	ext2 := New(db, client2, client2, 0.5, 1)
@@ -91,6 +95,7 @@ func TestProcess_ExactNameDedup(t *testing.T) {
 	if err := ext2.Process(ctx, "JONATHAN HARKER left.", "b.txt", "g"); err != nil {
 		t.Fatal(err)
 	}
+	ext2.Wait()
 
 	n, _ := db.CountEntities(ctx, "g")
 	if n != 1 {
@@ -107,6 +112,7 @@ func TestProcess_SourcePopulated(t *testing.T) {
 	if err := ext.Process(ctx, "Jonathan Harker arrived.", "dracula/chapter1.txt", "g"); err != nil {
 		t.Fatal(err)
 	}
+	ext.Wait()
 
 	// Retrieve entity UUID via FTS
 	entities, err := db.SearchEntitiesFTS(ctx, "Jonathan", "g", 1)
