@@ -185,18 +185,33 @@ func applyMacros(text string, macros map[string]string) string {
 }
 
 // runDetex writes text to a temp file and runs detex on it.
-func (w *Walker) runDetex(ctx context.Context, text string) (string, error) {
+func (w *Walker) runDetex(ctx context.Context, text string) (_ string, err error) {
 	tmp, err := os.CreateTemp("", "ultramemory-detex-*.tex")
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(tmp.Name())
+	tmpName := tmp.Name()
+	defer func() {
+		removeErr := os.Remove(tmpName)
+		if removeErr == nil {
+			return
+		}
+		if err != nil {
+			return
+		}
+		err = fmt.Errorf("remove detex temp file: %w", removeErr)
+	}()
 
 	if _, err := tmp.WriteString(text); err != nil {
-		tmp.Close()
-		return "", err
+		closeErr := tmp.Close()
+		if closeErr == nil {
+			return "", err
+		}
+		return "", fmt.Errorf("write detex temp file: %w (close temp file: %v)", err, closeErr)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close detex temp file: %w", err)
+	}
 
 	out, err := exec.CommandContext(ctx, w.detexBin, "-l", tmp.Name()).Output()
 	if err != nil {

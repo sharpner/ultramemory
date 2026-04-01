@@ -55,7 +55,7 @@ func TestOpen_PathWithSpaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with spaces in path: %v", err)
 	}
-	defer db.Close()
+	defer closeTestDB(t, db)
 
 	// Verify PRAGMAs are active by checking WAL mode.
 	var journalMode string
@@ -77,14 +77,14 @@ func TestRunMigrations_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db1.Close()
+	closeTestDB(t, db1)
 
 	// Open again — migrations should succeed (duplicate column = no-op).
 	db2, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("second Open failed: %v", err)
 	}
-	db2.Close()
+	closeTestDB(t, db2)
 }
 
 func TestOpen_StampsCurrentDBFormat(t *testing.T) {
@@ -117,7 +117,7 @@ func TestOpen_LegacyDBWithoutMetaGetsStamped(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open legacy db: %v", err)
 		}
-		defer db.Close()
+		defer closeTestDB(t, db)
 	}
 	if CurrentDBFormat() != DBFormatOllama {
 		if err == nil {
@@ -180,7 +180,7 @@ func openDBForTest(t *testing.T) *DB {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = db.Close()
+		closeTestDB(t, db)
 	})
 	return db
 }
@@ -197,7 +197,7 @@ func openRawSQLite(t *testing.T, path string) *sql.DB {
 func readDBFormatAtPath(t *testing.T, path string) string {
 	t.Helper()
 	conn := openRawSQLite(t, path)
-	defer conn.Close()
+	defer closeTestSQLite(t, conn)
 
 	var format string
 	err := conn.QueryRow(`SELECT value FROM db_meta WHERE key = ?`, DBFormatKey).Scan(&format)
@@ -205,6 +205,20 @@ func readDBFormatAtPath(t *testing.T, path string) string {
 		t.Fatalf("read db format at path: %v", err)
 	}
 	return format
+}
+
+func closeTestDB(t *testing.T, db *DB) {
+	t.Helper()
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+}
+
+func closeTestSQLite(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close sqlite connection: %v", err)
+	}
 }
 
 func otherDBFormat() string {

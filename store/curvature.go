@@ -279,46 +279,6 @@ func (d *DB) CurvatureStatus(ctx context.Context, groupID string) (total, bridge
 	return
 }
 
-// removeFromSorted removes val from a sorted slice in O(log n + n).
-func removeFromSorted(s []int64, val int64) []int64 {
-	i, found := slices.BinarySearch(s, val)
-	if !found {
-		return s
-	}
-	return slices.Delete(s, i, i+1)
-}
-
-// largestComponent returns the size of the largest connected component.
-func largestComponent(g *adjGraph, nodeCount int64) int {
-	visited := make([]bool, nodeCount)
-	largest := 0
-	for id := int64(0); id < nodeCount; id++ {
-		if visited[id] {
-			continue
-		}
-		size := 0
-		queue := []int64{id}
-		for len(queue) > 0 {
-			n := queue[0]
-			queue = queue[1:]
-			if visited[n] {
-				continue
-			}
-			visited[n] = true
-			size++
-			for _, nb := range g.neighbors[n] {
-				if !visited[nb] {
-					queue = append(queue, nb)
-				}
-			}
-		}
-		if size > largest {
-			largest = size
-		}
-	}
-	return largest
-}
-
 // --- Ollivier-Ricci Curvature ---
 //
 // κ(u,v) = 1 - W₁(μ_u, μ_v)
@@ -445,4 +405,3 @@ func transportCost(C []float64, du, dv int) float64 {
 
 	return total
 }
-
