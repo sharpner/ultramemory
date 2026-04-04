@@ -40,6 +40,7 @@ func (d *DB) NextJob(ctx context.Context) (*Job, error) {
 		WHERE id = (
 			SELECT id FROM jobs
 			WHERE status = 'pending'
+			  AND (not_before IS NULL OR not_before <= CURRENT_TIMESTAMP)
 			ORDER BY created_at ASC
 			LIMIT 1
 		)
@@ -65,14 +66,21 @@ func (d *DB) CompleteJob(ctx context.Context, id int64) error {
 }
 
 // FailJob marks a job as failed and increments attempts.
-// If max_attempts exceeded the job stays failed; otherwise requeues as pending.
+// If max_attempts exceeded the job stays failed; otherwise requeues as pending
+// with an exponential backoff delay (5s → 15s → 30s) before it becomes eligible again.
 func (d *DB) FailJob(ctx context.Context, id int64, reason string) error {
 	_, err := d.sql.ExecContext(ctx, `
 		UPDATE jobs SET
 			status     = CASE WHEN attempts + 1 >= max_attempts THEN 'failed' ELSE 'pending' END,
 			attempts   = attempts + 1,
 			error      = ?,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = CURRENT_TIMESTAMP,
+			not_before = CASE
+				WHEN attempts + 1 >= max_attempts THEN NULL
+				WHEN attempts = 0 THEN datetime('now', '+5 seconds')
+				WHEN attempts = 1 THEN datetime('now', '+15 seconds')
+				ELSE datetime('now', '+30 seconds')
+			END
 		WHERE id = ?`,
 		reason, id,
 	)

@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestMistralEmbedBatch_ReordersByIndex(t *testing.T) {
@@ -111,6 +113,87 @@ func TestMistralOCR_EncodesImageURLAndJoinsPages(t *testing.T) {
 	}
 	if text != "first page\n\nsecond page" {
 		t.Fatalf("OCR text = %q, want joined markdown", text)
+	}
+}
+
+func TestMistralPostJSON_RetriesOn503(t *testing.T) {
+	var attempts atomic.Int32
+	client := NewMistral("test-key", "mistral-small")
+	client.retryBackoffs = []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			n := int(attempts.Add(1))
+			if n <= 2 {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     http.Header{"Content-Type": []string{"text/plain"}},
+					Body:       io.NopCloser(strings.NewReader("rate limit")),
+				}, nil
+			}
+			return jsonResponse(`{"choices":[{"message":{"content":"ok"}}]}`), nil
+		}),
+	}
+
+	answer, err := client.Answer(context.Background(), "sys", "user", 10)
+	if err != nil {
+		t.Fatalf("Answer after retries: %v", err)
+	}
+	if answer != "ok" {
+		t.Errorf("answer = %q, want ok", answer)
+	}
+	if got := int(attempts.Load()); got != 3 {
+		t.Errorf("attempts = %d, want 3 (2 retries + 1 success)", got)
+	}
+}
+
+func TestMistralPostJSON_ExhaustsRetries(t *testing.T) {
+	var attempts atomic.Int32
+	client := NewMistral("test-key", "mistral-small")
+	client.retryBackoffs = []time.Duration{10 * time.Millisecond}
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     http.Header{"Content-Type": []string{"text/plain"}},
+				Body:       io.NopCloser(strings.NewReader("overloaded")),
+			}, nil
+		}),
+	}
+
+	_, err := client.Answer(context.Background(), "sys", "user", 10)
+	if err == nil {
+		t.Fatal("expected error after exhausted retries")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error = %q, want mention of 503", err.Error())
+	}
+	if got := int(attempts.Load()); got != 2 {
+		t.Errorf("attempts = %d, want 2 (1 initial + 1 retry)", got)
+	}
+}
+
+func TestMistralPostJSON_NoRetryOn400(t *testing.T) {
+	var attempts atomic.Int32
+	client := NewMistral("test-key", "mistral-small")
+	client.retryBackoffs = []time.Duration{10 * time.Millisecond}
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"text/plain"}},
+				Body:       io.NopCloser(strings.NewReader("bad request")),
+			}, nil
+		}),
+	}
+
+	_, err := client.Answer(context.Background(), "sys", "user", 10)
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if got := int(attempts.Load()); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry for 400)", got)
 	}
 }
 

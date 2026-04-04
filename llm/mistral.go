@@ -19,6 +19,7 @@ type MistralClient struct {
 	apiKey      string
 	http        *http.Client
 	temperature float64
+	retryBackoffs []time.Duration // overridable for tests; nil uses defaults
 }
 
 // SetTemperature sets the LLM temperature for subsequent calls.
@@ -40,6 +41,56 @@ func NewMistral(apiKey, model string) *MistralClient {
 		apiKey: apiKey,
 		http:   &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// postJSON sends a POST with retry on transient errors (429, 503, 5xx).
+// Returns response body, HTTP status code, and any transport error.
+func (m *MistralClient) postJSON(ctx context.Context, url string, payload []byte, maxRespBytes int64) ([]byte, int, error) {
+	backoffs := m.retryBackoffs
+	if backoffs == nil {
+		backoffs = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
+	}
+
+	for attempt := range len(backoffs) + 1 {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+m.apiKey)
+
+		resp, err := m.http.Do(req)
+		if err != nil {
+			return nil, 0, fmt.Errorf("request: %w", err)
+		}
+
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
+		resp.Body.Close() //nolint:errcheck
+		if err != nil {
+			return nil, 0, err
+		}
+
+		if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return data, resp.StatusCode, nil
+		}
+
+		if attempt >= len(backoffs) {
+			return data, resp.StatusCode, nil
+		}
+
+		slog.Warn("mistral transient error, retrying",
+			"status", resp.StatusCode,
+			"attempt", attempt+1,
+			"backoff", backoffs[attempt],
+		)
+
+		select {
+		case <-time.After(backoffs[attempt]):
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
+	panic("unreachable")
 }
 
 // Judge evaluates whether a predicted answer is semantically correct given the gold answer.
@@ -69,26 +120,12 @@ Rules:
 	}
 
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.mistral.ai/v1/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.apiKey)
-
-	resp, err := m.http.Do(req)
+	data, status, err := m.postJSON(ctx, "https://api.mistral.ai/v1/chat/completions", raw, 1<<20)
 	if err != nil {
 		return false, fmt.Errorf("mistral judge: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return false, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("mistral judge HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	if status != http.StatusOK {
+		return false, fmt.Errorf("mistral judge HTTP %d: %s", status, truncate(string(data), 120))
 	}
 
 	var cr struct {
@@ -128,26 +165,12 @@ func (m *MistralClient) Answer(ctx context.Context, system, user string, maxToke
 	}
 
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.mistral.ai/v1/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.apiKey)
-
-	resp, err := m.http.Do(req)
+	data, status, err := m.postJSON(ctx, "https://api.mistral.ai/v1/chat/completions", raw, 1<<20)
 	if err != nil {
 		return "", fmt.Errorf("mistral request: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("mistral HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	if status != http.StatusOK {
+		return "", fmt.Errorf("mistral HTTP %d: %s", status, truncate(string(data), 120))
 	}
 
 	var cr struct {
@@ -190,26 +213,12 @@ func (m *MistralClient) EmbedBatch(ctx context.Context, texts []string) ([][]flo
 	}
 
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.mistral.ai/v1/embeddings", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.apiKey)
-
-	resp, err := m.http.Do(req)
+	data, status, err := m.postJSON(ctx, "https://api.mistral.ai/v1/embeddings", raw, 8<<20)
 	if err != nil {
 		return nil, fmt.Errorf("mistral embed request: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mistral embed HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("mistral embed HTTP %d: %s", status, truncate(string(data), 120))
 	}
 
 	var result struct {
@@ -255,26 +264,12 @@ func (m *MistralClient) OCR(ctx context.Context, imageBytes []byte) (string, err
 	}
 
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.mistral.ai/v1/ocr", bytes.NewReader(raw))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.apiKey)
-
-	resp, err := m.http.Do(req)
+	data, status, err := m.postJSON(ctx, "https://api.mistral.ai/v1/ocr", raw, 8<<20)
 	if err != nil {
 		return "", fmt.Errorf("mistral OCR request: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("mistral OCR HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	if status != http.StatusOK {
+		return "", fmt.Errorf("mistral OCR HTTP %d: %s", status, truncate(string(data), 120))
 	}
 
 	var result struct {
@@ -316,26 +311,12 @@ func (m *MistralClient) mistralChat(ctx context.Context, system, user string, js
 	}
 
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.mistral.ai/v1/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.apiKey)
-
-	resp, err := m.http.Do(req)
+	data, status, err := m.postJSON(ctx, "https://api.mistral.ai/v1/chat/completions", raw, 2<<20)
 	if err != nil {
 		return "", fmt.Errorf("mistral request: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("mistral HTTP %d: %s", resp.StatusCode, truncate(string(data), 120))
+	if status != http.StatusOK {
+		return "", fmt.Errorf("mistral HTTP %d: %s", status, truncate(string(data), 120))
 	}
 
 	var cr struct {

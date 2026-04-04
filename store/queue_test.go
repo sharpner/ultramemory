@@ -230,6 +230,50 @@ func TestRequeueFailed(t *testing.T) {
 	}
 }
 
+func TestFailJob_SetsNotBefore(t *testing.T) {
+	db := openQueueTestDB(t)
+	ctx := context.Background()
+
+	if err := db.PushJob(ctx, JobTypeIngest, `{"test":1}`); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.NextJob(ctx)
+
+	// First failure → should set not_before ~5s in the future.
+	if err := db.FailJob(ctx, job.ID, "503 rate limit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Job should NOT be claimable immediately (not_before is in the future).
+	next, err := db.NextJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != nil {
+		t.Error("expected job to be delayed by not_before, but it was claimable immediately")
+	}
+
+	// Backdate not_before to make it claimable.
+	_, err = db.sql.ExecContext(ctx,
+		`UPDATE jobs SET not_before = datetime('now', '-1 seconds') WHERE id = ?`,
+		job.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next, err = db.NextJob(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == nil {
+		t.Fatal("expected job to be claimable after not_before expired")
+	}
+	if next.ID != job.ID {
+		t.Errorf("expected job ID %d, got %d", job.ID, next.ID)
+	}
+}
+
 func TestRequeueFailed_NothingFailed(t *testing.T) {
 	db := openQueueTestDB(t)
 	ctx := context.Background()

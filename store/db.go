@@ -94,12 +94,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 	attempts   INTEGER NOT NULL DEFAULT 0,
 	max_attempts INTEGER NOT NULL DEFAULT 3,
 	error      TEXT,
+	not_before DATETIME,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_pending
-	ON jobs(created_at ASC)
+	ON jobs(status, not_before, created_at ASC)
 	WHERE status = 'pending';
 
 CREATE INDEX IF NOT EXISTS idx_entities_group
@@ -145,6 +146,7 @@ CREATE TABLE IF NOT EXISTS mutual_knn_edges (
 	PRIMARY KEY (source_uuid, target_uuid, group_id)
 );
 CREATE INDEX IF NOT EXISTS idx_mknn_group ON mutual_knn_edges(group_id);
+ALTER TABLE jobs ADD COLUMN not_before DATETIME;
 `
 
 // DB wraps a SQLite database connection.

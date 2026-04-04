@@ -3,8 +3,10 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -123,6 +125,82 @@ type ExtractedEdge struct {
 	Fact           string  `json:"fact"`
 	ValidAt        *string `json:"valid_at"`
 	InvalidAt      *string `json:"invalid_at"`
+}
+
+// UnmarshalJSON handles LLM type variance: source/target IDs may arrive as
+// int, float, or string; valid_at/invalid_at may arrive as string or number.
+func (e *ExtractedEdge) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		RelationType   string          `json:"relation_type"`
+		SourceEntityID json.RawMessage `json:"source_entity_id"`
+		TargetEntityID json.RawMessage `json:"target_entity_id"`
+		Fact           string          `json:"fact"`
+		ValidAt        json.RawMessage `json:"valid_at"`
+		InvalidAt      json.RawMessage `json:"invalid_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.RelationType = raw.RelationType
+	e.Fact = raw.Fact
+
+	var err error
+	e.SourceEntityID, err = parseFlexibleInt(raw.SourceEntityID)
+	if err != nil {
+		return fmt.Errorf("source_entity_id: %w", err)
+	}
+	e.TargetEntityID, err = parseFlexibleInt(raw.TargetEntityID)
+	if err != nil {
+		return fmt.Errorf("target_entity_id: %w", err)
+	}
+	e.ValidAt = parseFlexibleStringPtr(raw.ValidAt)
+	e.InvalidAt = parseFlexibleStringPtr(raw.InvalidAt)
+	return nil
+}
+
+// parseFlexibleInt accepts JSON int, float64, or string and returns int.
+func parseFlexibleInt(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, nil
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return int(f), nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if i, err := strconv.Atoi(s); err == nil {
+			return i, nil
+		}
+		if fv, err := strconv.ParseFloat(s, 64); err == nil {
+			return int(fv), nil
+		}
+	}
+	return 0, fmt.Errorf("cannot parse %s as int", string(raw))
+}
+
+// parseFlexibleStringPtr accepts JSON string or number → *string. Returns nil for null.
+func parseFlexibleStringPtr(raw json.RawMessage) *string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if s == "" {
+			return nil
+		}
+		return &s
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		s = strconv.FormatFloat(f, 'f', -1, 64)
+		return &s
+	}
+	return nil
 }
 
 type ExtractedEdges struct {
